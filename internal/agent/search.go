@@ -1,0 +1,174 @@
+package agent
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/bmatcuk/doublestar/v4"
+)
+
+const grepResultLimit = 200
+
+var skipDirs = map[string]bool{
+	".git": true, "node_modules": true, "vendor": true, ".venv": true,
+}
+
+func globTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "glob",
+			Description: "Find files by glob pattern (supports ** for recursive matching), relative to the working directory. Returns matching paths sorted.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern": map[string]any{
+						"type":        "string",
+						"description": `Glob pattern, e.g. "**/*.go" or "internal/**/*_test.go"`,
+					},
+				},
+				"required": []string{"pattern"},
+			},
+		},
+	}
+}
+
+func grepTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "grep",
+			Description: "Search file contents by regular expression across the working directory. Returns matching lines as path:line:text, capped at the first " + fmt.Sprint(grepResultLimit) + " matches.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern": map[string]any{
+						"type":        "string",
+						"description": "Regular expression to search for (RE2 syntax)",
+					},
+					"glob": map[string]any{
+						"type":        "string",
+						"description": `Optional glob to restrict which files are searched, e.g. "**/*.go"`,
+					},
+				},
+				"required": []string{"pattern"},
+			},
+		},
+	}
+}
+
+func runGlob(workDir string, rawInput json.RawMessage) (string, error) {
+	var in struct {
+		Pattern string `json:"pattern"`
+	}
+	if err := json.Unmarshal(rawInput, &in); err != nil {
+		return "", err
+	}
+
+	matches, err := doublestar.Glob(os.DirFS(workDir), in.Pattern)
+	if err != nil {
+		return "", err
+	}
+	if len(matches) == 0 {
+		return "(no matches)", nil
+	}
+	sort.Strings(matches)
+	return strings.Join(matches, "\n"), nil
+}
+
+func runGrep(workDir string, rawInput json.RawMessage) (string, error) {
+	var in struct {
+		Pattern string `json:"pattern"`
+		Glob    string `json:"glob"`
+	}
+	if err := json.Unmarshal(rawInput, &in); err != nil {
+		return "", err
+	}
+
+	re, err := regexp.Compile(in.Pattern)
+	if err != nil {
+		return "", fmt.Errorf("invalid pattern: %w", err)
+	}
+
+	var results []string
+	err = filepath.WalkDir(workDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if len(results) >= grepResultLimit {
+			return filepath.SkipAll
+		}
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		rel, err := filepath.Rel(workDir, path)
+		if err != nil {
+			return nil
+		}
+		if in.Glob != "" {
+			ok, err := doublestar.Match(in.Glob, rel)
+			if err != nil || !ok {
+				return nil
+			}
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			return nil // unreadable file, skip
+		}
+		defer f.Close()
+
+		if isBinary(f) {
+			return nil
+		}
+
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		lineNum := 0
+		for scanner.Scan() {
+			lineNum++
+			if re.MatchString(scanner.Text()) {
+				results = append(results, fmt.Sprintf("%s:%d:%s", rel, lineNum, scanner.Text()))
+				if len(results) >= grepResultLimit {
+					break
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+
+	if len(results) == 0 {
+		return "(no matches)", nil
+	}
+	if len(results) >= grepResultLimit {
+		results = append(results, fmt.Sprintf("… truncated at %d matches", grepResultLimit))
+	}
+	return strings.Join(results, "\n"), nil
+}
+
+// isBinary sniffs the first chunk of an already-open file for a NUL byte,
+// then rewinds it for the caller. A crude but standard heuristic.
+func isBinary(f *os.File) bool {
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	defer f.Seek(0, 0)
+	for _, b := range buf[:n] {
+		if b == 0 {
+			return true
+		}
+	}
+	return false
+}

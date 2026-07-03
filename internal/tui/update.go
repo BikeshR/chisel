@@ -1,0 +1,190 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/BikeshR/chisel/internal/agent"
+)
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		m.viewport.Width = msg.Width
+		m.viewport.Height = msg.Height - 4 // input line + status bar + margin
+		m.textInput.Width = msg.Width - 2
+		return m, nil
+
+	case tea.KeyMsg:
+		return m.handleKey(msg)
+
+	case streamEventMsg:
+		return m.handleStreamEvent(msg)
+
+	case toolResultMsg:
+		return m.handleToolResult(msg.result)
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.KeyCtrlC {
+		m.quitting = true
+		return m, tea.Quit
+	}
+
+	switch m.state {
+	case stateAwaitingPermission:
+		switch msg.String() {
+		case "y", "Y", "enter":
+			call := m.pendingUses[0]
+			m.state = stateExecutingTool
+			m.appendLine(dimStyle.Render("  → approved"))
+			return m, executeTool(m.workDir, call)
+		case "n", "N", "esc":
+			return m.handleToolResult(agent.ToolResult{
+				ID:      m.pendingUses[0].ID,
+				Content: "The user denied permission for this action.",
+				IsError: true,
+			})
+		}
+		return m, nil
+
+	case stateInput:
+		if msg.Type == tea.KeyEnter {
+			return m.submit()
+		}
+		var cmd tea.Cmd
+		m.textInput, cmd = m.textInput.Update(msg)
+		return m, cmd
+
+	default:
+		// Busy (waiting on the model or a tool) — ignore keystrokes.
+		return m, nil
+	}
+}
+
+func (m Model) submit() (tea.Model, tea.Cmd) {
+	text := m.textInput.Value()
+	if text == "" {
+		return m, nil
+	}
+	m.textInput.Reset()
+
+	if strings.HasPrefix(text, "/") {
+		m = m.handleCommand(text)
+		return m, textinput.Blink
+	}
+
+	m.messages = append(m.messages, agent.Message{Role: "user", Content: text})
+	m.appendLine(userStyle.Render("you  ") + text)
+	m.state = stateWaitingModel
+
+	return m, tea.Batch(startStream(m.client, m.messages), textinput.Blink)
+}
+
+// handleStreamEvent processes one event from the in-flight response. While
+// the stream is still going it renders text deltas live and re-arms the
+// listener; once done, it hands the fully accumulated message off to
+// handleStreamComplete.
+func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
+	ev := msg.event
+
+	if ev.TextDelta != "" {
+		m.appendStreamText(ev.TextDelta)
+	}
+
+	if !ev.Done {
+		return m, waitForChunk(msg.ch)
+	}
+
+	if ev.Err != nil {
+		m.err = ev.Err
+		m.endStreamLine()
+		m.appendLine(errorStyle.Render("error  " + ev.Err.Error()))
+		m.state = stateInput
+		return m, nil
+	}
+
+	return m.handleStreamComplete(*ev.Message, ev.FinishReason, ev.Usage)
+}
+
+func (m Model) handleStreamComplete(resp agent.Message, finishReason string, usage agent.Usage) (tea.Model, tea.Cmd) {
+	m.endStreamLine()
+
+	m.messages = append(m.messages, resp)
+	m.tokensIn += usage.InputTokens
+	m.tokensOut += usage.OutputTokens
+	m.pendingUses = resp.ToolCalls
+
+	if finishReason != "tool_calls" || len(m.pendingUses) == 0 {
+		m.state = stateInput
+		return m, nil
+	}
+
+	return m.dispatchNextTool()
+}
+
+// dispatchNextTool looks at the front of the pending tool-use queue and
+// either asks for permission or runs it immediately.
+func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
+	call := m.pendingUses[0]
+
+	if agent.NeedsPermission(call) {
+		m.state = stateAwaitingPermission
+		m.appendLine(permissionStyle.Render(fmt.Sprintf("allow %s?  [y/n]", agent.Summarize(call))))
+		return m, nil
+	}
+
+	m.state = stateExecutingTool
+	m.appendLine(toolStyle.Render("  " + agent.Summarize(call)))
+	return m, executeTool(m.workDir, call)
+}
+
+func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
+	if len(m.pendingUses) == 0 {
+		return m, nil
+	}
+
+	if result.IsError {
+		m.appendLine(errorStyle.Render("  ✗ " + firstLine(result.Content)))
+	} else {
+		m.appendLine(dimStyle.Render("  ✓ " + firstLine(result.Content)))
+	}
+
+	m.pendingResults = append(m.pendingResults, result.ToMessage())
+	m.pendingUses = m.pendingUses[1:]
+
+	if len(m.pendingUses) > 0 {
+		return m.dispatchNextTool()
+	}
+
+	m.messages = append(m.messages, m.pendingResults...)
+	m.pendingResults = nil
+	m.state = stateWaitingModel
+	return m, startStream(m.client, m.messages)
+}
+
+func firstLine(s string) string {
+	for i, r := range s {
+		if r == '\n' {
+			return s[:i]
+		}
+	}
+	if len(s) > 120 {
+		return s[:120] + "…"
+	}
+	return s
+}
