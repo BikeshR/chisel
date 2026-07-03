@@ -97,7 +97,7 @@ func (c *Client) SendStreaming(ctx context.Context, history []Message) (<-chan E
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		return nil, fmt.Errorf("%s %s: %d %s", req.Method, req.URL.Path, resp.StatusCode, describeError(data))
 	}
@@ -152,7 +152,7 @@ type streamChunk struct {
 // convention this otherwise follows.
 func decodeStream(body io.ReadCloser, ch chan<- Event) {
 	defer close(ch)
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	var content strings.Builder
 	var finishReason string

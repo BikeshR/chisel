@@ -73,6 +73,6 @@ func loadDotEnv() {
 		if _, set := os.LookupEnv(key); set {
 			continue // real environment wins
 		}
-		os.Setenv(key, strings.TrimSpace(value))
+		_ = os.Setenv(key, strings.TrimSpace(value)) // key came from our own trusted config file
 	}
 }

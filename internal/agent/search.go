@@ -126,7 +126,7 @@ func runGrep(workDir string, rawInput json.RawMessage) (string, error) {
 		if err != nil {
 			return nil // unreadable file, skip
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 
 		if isBinary(f) {
 			return nil
@@ -164,7 +164,7 @@ func runGrep(workDir string, rawInput json.RawMessage) (string, error) {
 func isBinary(f *os.File) bool {
 	buf := make([]byte, 512)
 	n, _ := f.Read(buf)
-	defer f.Seek(0, 0)
+	defer func() { _, _ = f.Seek(0, 0) }()
 	for _, b := range buf[:n] {
 		if b == 0 {
 			return true
