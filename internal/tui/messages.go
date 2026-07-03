@@ -13,3 +13,10 @@ type streamEventMsg struct {
 type toolResultMsg struct {
 	result agent.ToolResult
 }
+
+// modelCheckResultMsg carries the outcome of a /model check.
+type modelCheckResultMsg struct {
+	model string
+	reply string
+	err   error
+}

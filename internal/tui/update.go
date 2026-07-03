@@ -30,6 +30,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toolResultMsg:
 		return m.handleToolResult(msg.result)
 
+	case modelCheckResultMsg:
+		return m.handleModelCheckResult(msg)
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -84,8 +87,9 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.textInput.Reset()
 
 	if strings.HasPrefix(text, "/") {
-		m = m.handleCommand(text)
-		return m, textinput.Blink
+		var cmd tea.Cmd
+		m, cmd = m.handleCommand(text)
+		return m, tea.Batch(cmd, textinput.Blink)
 	}
 
 	m.messages = append(m.messages, agent.Message{Role: "user", Content: text})

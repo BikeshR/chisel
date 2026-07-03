@@ -165,25 +165,29 @@ subscription-based, not metered per-token, so the wire format and model
 choice have no separate cost implication beyond which models the
 subscription includes.
 
-Confirmed by direct testing (2026-07) against the live catalog
-(`agent.KnownModels()`, sourced from OpenCode Go's own `/v1/models`
-endpoint):
+Confirmed by direct testing against the live catalog (`agent.KnownModels()`,
+sourced from OpenCode Go's own `/v1/models` endpoint):
 
 | Model | Status |
 |---|---|
 | `minimax-m3` | Works — current default, cleanest responses in testing |
 | `glm-5.2`, `glm-5.1`, `glm-5` | `glm-5.2` confirmed working |
 | `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` | `qwen3.7-max` confirmed working; emits its own `<think>` reasoning inline in the response text, not a separate field |
-| `deepseek-v4-pro`, `deepseek-v4-flash` | `deepseek-v4-flash` fails with a generic upstream 400 — not a chisel-side issue, likely transient on OpenCode's/that backend's side |
-| `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5` | `kimi-k2.6` fails the same way as deepseek |
+| `deepseek-v4-pro`, `deepseek-v4-flash` | `deepseek-v4-flash` confirmed working (2026-07) — initially failed with a generic upstream 400 earlier the same month, resolved on OpenCode's/that backend's side by the time it was re-checked |
+| `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5` | `kimi-k2.6` confirmed working (2026-07) — same recovery as deepseek-v4-flash |
 | `minimax-m2.7`, `minimax-m2.5` | Untested |
 | `mimo-v2-pro`, `mimo-v2-omni`, `mimo-v2.5-pro`, `mimo-v2.5` | Untested |
 | `hy3-preview` | Untested |
 
-Switch models anytime with `/model` (no args lists the catalog with the
-current one marked; `/model <id>` switches immediately, mid-session).
-Worth re-checking the untested/failing ones periodically — OpenCode's
-working set isn't necessarily static.
+That deepseek/kimi recovery is itself the reason `/model check` exists now
+(see Phase 2 below) rather than this table being the only source of truth
+— a static snapshot goes stale exactly like this one did, and there's no
+way to know it has without asking the model directly. Switch models
+anytime with `/model` (no args lists the catalog with the current one
+marked; `/model <id>` switches immediately, mid-session; `/model check
+[id]` live-tests one through chisel's real request shape — system prompt
+and tools included, so it catches the same class of failure as a genuine
+chat turn, not just plain reachability).
 
 **On caching:** OpenCode Go's responses include real `prompt_tokens_details.
 cached_tokens` in the usage payload — genuine, automatic caching, no
@@ -206,6 +210,7 @@ Four phases, each a genuinely usable tool in its own right.
 
 - ~~Streamed output instead of waiting for the full response~~ — **done**: hand-rolled SSE decode, text deltas render live via a channel + `tea.Cmd` re-arm loop (`internal/tui/stream.go`)
 - ~~A config file for model choice~~ — **done**: `CHISEL_MODEL` env var (switchable at runtime with `/model`), plus an optional `~/.chisel.env` (outside the repo, never committed) for `CHISEL_API_KEY`/`CHISEL_BASE_URL`/`CHISEL_MODEL`. Working-directory scope and an allowed-commands list are still open.
+- ~~Model health-check~~ — **done**: `/model check [id]` (`internal/tui/commands.go`) sends a minimal request through chisel's real request shape (system prompt + tools included) and reports pass/fail with the actual reply or error. Caught a real, useful finding immediately: `deepseek-v4-flash` and `kimi-k2.6`, both recorded as failing in §4 earlier in July 2026, now work — confirms this needed to be a live check, not a maintained static list.
 - Session persistence — save and resume transcripts to disk
 - Git awareness: show a diff before writing, optionally auto-commit like Aider
 - Persistent bash session (currently each `bash` call is a fresh subprocess — no `cd`/env across calls)
