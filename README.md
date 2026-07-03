@@ -16,6 +16,19 @@ it in `~/.chisel.env` (outside the repo, never committed) along with
 `CHISEL_MODEL` to pick a model. Chisel operates on the directory it's run
 from. Switch models anytime in-app with `/model`.
 
+## Development
+
+```sh
+make check    # fmt + vet + lint + unit tests — no network needed
+make build    # ./chisel
+make install  # go install . — puts chisel on your PATH
+```
+
+`golangci-lint` needs installing separately (see
+[golangci-lint.run](https://golangci-lint.run/welcome/install/)) — CI runs
+it on every push. Live-network tests against the real API
+(`make integration-test`) need `CHISEL_API_KEY` set and aren't part of CI.
+
 ## Status
 
 Phase 1 (minimum viable agent) done, Phase 2 (daily driver) in progress —
