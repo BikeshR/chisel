@@ -4,6 +4,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // These fixtures are the actual SSE bytes captured from OpenCode Go
@@ -145,5 +146,48 @@ func TestDecodeStreamEmptyResponseIsAnError(t *testing.T) {
 
 	if len(events) != 1 || !events[0].Done || events[0].Err == nil {
 		t.Fatalf("expected exactly one Done event with a non-nil error, got %+v", events)
+	}
+}
+
+// TestDecodeStreamIdleTimeoutFires is the real end-to-end proof for the
+// read-idle watchdog: a pipe that receives one valid chunk and then
+// simply never sends anything else — never closes either, exactly what
+// a stuck upstream or a silently dropped connection looks like — must
+// still produce a terminal error well before the test's own patience
+// runs out, not hang forever.
+func TestDecodeStreamIdleTimeoutFires(t *testing.T) {
+	old := sseReadIdleTimeout
+	sseReadIdleTimeout = 100 * time.Millisecond
+	defer func() { sseReadIdleTimeout = old }()
+
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+
+	ch := make(chan Event)
+	go decodeStream(pr, ch)
+
+	if _, err := pw.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev := <-ch:
+		if ev.TextDelta != "hi" {
+			t.Fatalf("first event = %+v, want the text delta from the one chunk sent", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("did not receive the initial text delta")
+	}
+
+	select {
+	case ev := <-ch:
+		if ev.Err == nil || !strings.Contains(ev.Err.Error(), "stalled") {
+			t.Fatalf("event = %+v, want a stalled-stream error after the idle timeout", ev)
+		}
+		if !ev.Done {
+			t.Error("expected the stall error to be a terminal (Done) event")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle timeout did not fire within 2s — the stalled pipe would otherwise hang decodeStream forever")
 	}
 }

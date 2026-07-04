@@ -246,6 +246,16 @@ type streamChunk struct {
 // frames after "[DONE]" (cost/usage bookkeeping) — decoding stops at
 // "[DONE]" and ignores anything after, per the OpenAI streaming
 // convention this otherwise follows.
+// sseReadIdleTimeout bounds how long decodeStream will wait for the
+// *next* line of an in-progress response before treating the
+// connection as stalled. Neither ResponseHeaderTimeout (which only
+// bounds getting the initial headers) nor esc-to-interrupt (which only
+// helps if someone happens to be watching and notices nothing is
+// happening) covers a body that stops sending data without ever
+// actually closing — this is the backstop for that. A var, not a
+// const, so tests can shorten it.
+var sseReadIdleTimeout = 60 * time.Second
+
 func decodeStream(body io.ReadCloser, ch chan<- Event) {
 	defer close(ch)
 	defer func() { _ = body.Close() }()
@@ -259,61 +269,114 @@ func decodeStream(body io.ReadCloser, ch chan<- Event) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		data, ok := strings.CutPrefix(line, "data:")
-		if !ok {
-			continue
-		}
-		data = strings.TrimSpace(data)
-		if data == "" {
-			continue
-		}
-		if data == "[DONE]" {
-			break
-		}
+	// Scanning runs in its own goroutine so the select loop below can
+	// race it against an idle timer — scanner.Scan() has no per-read
+	// deadline of its own. stop lets that goroutine exit on every path
+	// out of this function (deferred, so it always closes) rather than
+	// blocking forever trying to send a line nothing will ever receive
+	// again — bufio.Scanner can have several lines already buffered
+	// internally (OpenCode sends a couple of trailing bookkeeping frames
+	// after "[DONE]", for instance), so a fixed-size buffered channel
+	// isn't enough to guarantee that on its own. scanner.Err() is read
+	// only inside this goroutine, right after Scan() returns false —
+	// never from the loop below concurrently, which is what a bufio.Scanner
+	// shared across two goroutines requires (its internal error field
+	// isn't safe for that otherwise).
+	type scanResult struct {
+		line string
+		more bool
+		err  error
+	}
+	lines := make(chan scanResult)
+	stop := make(chan struct{})
+	defer close(stop)
 
-		var chunk streamChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			ch <- Event{Done: true, Err: fmt.Errorf("decode stream chunk: %w", err)}
+	go func() {
+		for scanner.Scan() {
+			select {
+			case lines <- scanResult{line: scanner.Text(), more: true}:
+			case <-stop:
+				return
+			}
+		}
+		select {
+		case lines <- scanResult{more: false, err: scanner.Err()}:
+		case <-stop:
+		}
+	}()
+
+	timer := time.NewTimer(sseReadIdleTimeout)
+	defer timer.Stop()
+
+readLoop:
+	for {
+		select {
+		case r := <-lines:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			if !r.more {
+				if r.err != nil {
+					ch <- Event{Done: true, Err: fmt.Errorf("read stream: %w", r.err)}
+					return
+				}
+				break readLoop
+			}
+			timer.Reset(sseReadIdleTimeout)
+
+			data, ok := strings.CutPrefix(r.line, "data:")
+			if !ok {
+				continue
+			}
+			data = strings.TrimSpace(data)
+			if data == "" {
+				continue
+			}
+			if data == "[DONE]" {
+				break readLoop
+			}
+
+			var chunk streamChunk
+			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+				ch <- Event{Done: true, Err: fmt.Errorf("decode stream chunk: %w", err)}
+				return
+			}
+			if chunk.Usage != nil {
+				usage.InputTokens = chunk.Usage.PromptTokens
+				usage.OutputTokens = chunk.Usage.CompletionTokens
+			}
+			if len(chunk.Choices) == 0 {
+				continue // vendor bookkeeping frame (e.g. cost tracking) or the usage-only chunk — nothing more to accumulate
+			}
+
+			choice := chunk.Choices[0]
+			if choice.Delta.Content != "" {
+				content.WriteString(choice.Delta.Content)
+				ch <- Event{TextDelta: choice.Delta.Content}
+			}
+			for _, tc := range choice.Delta.ToolCalls {
+				existing, seen := toolCalls[tc.Index]
+				if !seen {
+					existing = &ToolCall{Type: "function"}
+					toolCalls[tc.Index] = existing
+					toolCallOrder = append(toolCallOrder, tc.Index)
+				}
+				if tc.ID != "" {
+					existing.ID = tc.ID
+				}
+				if tc.Function.Name != "" {
+					existing.Function.Name = tc.Function.Name
+				}
+				existing.Function.Arguments += tc.Function.Arguments
+			}
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
+
+		case <-timer.C:
+			ch <- Event{Done: true, Err: fmt.Errorf("stream stalled: no data received for %s", sseReadIdleTimeout)}
 			return
 		}
-		if chunk.Usage != nil {
-			usage.InputTokens = chunk.Usage.PromptTokens
-			usage.OutputTokens = chunk.Usage.CompletionTokens
-		}
-		if len(chunk.Choices) == 0 {
-			continue // vendor bookkeeping frame (e.g. cost tracking) or the usage-only chunk — nothing more to accumulate
-		}
-
-		choice := chunk.Choices[0]
-		if choice.Delta.Content != "" {
-			content.WriteString(choice.Delta.Content)
-			ch <- Event{TextDelta: choice.Delta.Content}
-		}
-		for _, tc := range choice.Delta.ToolCalls {
-			existing, seen := toolCalls[tc.Index]
-			if !seen {
-				existing = &ToolCall{Type: "function"}
-				toolCalls[tc.Index] = existing
-				toolCallOrder = append(toolCallOrder, tc.Index)
-			}
-			if tc.ID != "" {
-				existing.ID = tc.ID
-			}
-			if tc.Function.Name != "" {
-				existing.Function.Name = tc.Function.Name
-			}
-			existing.Function.Arguments += tc.Function.Arguments
-		}
-		if choice.FinishReason != "" {
-			finishReason = choice.FinishReason
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		ch <- Event{Done: true, Err: fmt.Errorf("read stream: %w", err)}
-		return
 	}
 
 	msg := Message{Role: "assistant", Content: content.String()}
