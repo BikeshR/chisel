@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -15,6 +16,7 @@ func bigTranscript(t *testing.T, n int) Model {
 	t.Helper()
 	m := Model{width: 80}
 	m.viewport = viewport.New(80, 5)
+	m.textArea = textarea.New()
 	for i := 0; i < n; i++ {
 		m.appendLine(strings.Repeat("x", 10))
 	}
@@ -59,7 +61,7 @@ func TestCtrlUScrollsOutsideStateInput(t *testing.T) {
 func TestCtrlUEditsTextInsteadOfScrollingInStateInput(t *testing.T) {
 	m := bigTranscript(t, 50)
 	m.state = stateInput
-	m.textInput.SetValue("hello")
+	m.textArea.SetValue("hello")
 
 	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlU})
 	gotModel := got.(Model)

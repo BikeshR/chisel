@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
@@ -20,8 +20,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - 4 // input line + status bar + margin
-		m.textInput.Width = msg.Width - 2
+		m.viewport.Height = msg.Height - inputHeight - 3 // input box + status bar + margin
+		m.textArea.SetWidth(msg.Width - 2)
 		// Re-wrap every entry to the new width — without this, the
 		// viewport's own hard truncation (not wrapping) at msg.Width
 		// would otherwise just cut off anything wider than the new
@@ -107,11 +107,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case stateInput:
-		if msg.Type == tea.KeyEnter {
+		// Plain enter submits; alt+enter (textArea's rebound
+		// InsertNewline — see New) falls through instead, so it never
+		// reaches this branch at all.
+		if msg.Type == tea.KeyEnter && !msg.Alt {
 			return m.submit()
 		}
 		var cmd tea.Cmd
-		m.textInput, cmd = m.textInput.Update(msg)
+		m.textArea, cmd = m.textArea.Update(msg)
 		return m, cmd
 
 	case stateWaitingModel, stateExecutingTool:
@@ -164,16 +167,16 @@ func (m *Model) handleScrollKey(msg tea.KeyMsg) bool {
 }
 
 func (m Model) submit() (tea.Model, tea.Cmd) {
-	text := m.textInput.Value()
+	text := strings.TrimSuffix(m.textArea.Value(), "\n")
 	if text == "" {
 		return m, nil
 	}
-	m.textInput.Reset()
+	m.textArea.Reset()
 
 	if strings.HasPrefix(text, "/") {
 		var cmd tea.Cmd
 		m, cmd = m.handleCommand(text)
-		return m, tea.Batch(cmd, textinput.Blink)
+		return m, tea.Batch(cmd, textarea.Blink)
 	}
 
 	if m.autoCommit {
@@ -191,7 +194,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.state = stateWaitingModel
 
 	ctx := m.newTurnContext()
-	return m, tea.Batch(startStream(ctx, m.client, m.messages), saveSession(m.workDir, m.messages), textinput.Blink)
+	return m, tea.Batch(startStream(ctx, m.client, m.messages), saveSession(m.workDir, m.messages), textarea.Blink)
 }
 
 // handleStreamEvent processes one event from the in-flight response. While

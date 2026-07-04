@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -18,6 +19,13 @@ import (
 	"github.com/BikeshR/chisel/internal/mcp"
 	"github.com/BikeshR/chisel/internal/session"
 )
+
+// inputHeight is how many rows the multi-line input box shows — fixed
+// rather than growing with content, so the rest of the layout (viewport
+// height, in particular) doesn't need to be recomputed on every
+// keystroke. Comfortably fits a pasted stack trace or a short code
+// block without needing internal scrolling for most real input.
+const inputHeight = 3
 
 type state int
 
@@ -42,9 +50,9 @@ type Model struct {
 	messages []agent.Message
 	entries  []entry // transcript, newest last — see transcript.go
 
-	textInput textinput.Model
-	viewport  viewport.Model
-	spinner   spinner.Model
+	textArea textarea.Model
+	viewport viewport.Model
+	spinner  spinner.Model
 
 	state          state
 	pendingUses    []agent.ToolCall
@@ -126,10 +134,17 @@ func interruptibleErrorText(err error) string {
 // which CHISEL.md files memory.Load found, just to show a startup line —
 // the content itself was already handed to the client via SetMemory.
 func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, resumed []agent.Message, savedAt time.Time) Model {
-	ti := textinput.New()
-	ti.Placeholder = "ask chisel to do something…"
-	ti.Focus()
-	ti.CharLimit = 4000
+	ta := textarea.New()
+	ta.Placeholder = "ask chisel to do something… (alt+enter for a new line)"
+	ta.Focus()
+	ta.CharLimit = 0 // unbounded — the whole point is supporting long pastes
+	ta.ShowLineNumbers = false
+	ta.SetHeight(inputHeight)
+	// Enter is handleKey's own submit trigger (see stateInput), never
+	// forwarded to the textarea — rebinding InsertNewline is what makes
+	// alt+enter available for a literal newline instead of enter's
+	// default (and, for this KeyMap, only) meaning.
+	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter"))
 
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 
@@ -143,7 +158,7 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 		mcp:           mcpRegistry,
 		hooks:         hooksCfg,
 		messages:      resumed,
-		textInput:     ti,
+		textArea:      ta,
 		viewport:      vp,
 		spinner:       sp,
 		state:         stateInput,
@@ -179,7 +194,7 @@ func memoryBannerText(memUser, memProject bool) string {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, m.spinner.Tick)
+	return tea.Batch(textarea.Blink, m.spinner.Tick)
 }
 
 func (m *Model) appendLine(s string) {

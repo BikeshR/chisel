@@ -24,7 +24,7 @@ func (m Model) View() string {
 	case stateExecutingTool:
 		b.WriteString(m.spinner.View() + " running…")
 	default:
-		b.WriteString(m.textInput.View())
+		b.WriteString(m.textArea.View())
 	}
 	b.WriteString("\n")
 
