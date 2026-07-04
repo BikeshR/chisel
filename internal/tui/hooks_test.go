@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/BikeshR/chisel/internal/agent"
 	"github.com/BikeshR/chisel/internal/hooks"
 	"github.com/BikeshR/chisel/internal/skill"
@@ -155,5 +157,55 @@ func TestExecuteToolThreadsSkillsToLoadSkill(t *testing.T) {
 	}
 	if result.Content != "Check for unchecked errors." {
 		t.Errorf("content = %q, want the skill's content", result.Content)
+	}
+}
+
+func TestExecuteToolBashBackgroundBlockedByPreHook(t *testing.T) {
+	dir := t.TempDir()
+
+	hooksCfg := hooks.Config{}
+	hooksCfg.Hooks.PreToolUse = []hooks.Hook{
+		{Match: "bash_background", Command: "echo blocked >&2; exit 1"},
+	}
+
+	call := agent.ToolCall{ID: "call_1", Function: agent.ToolCallFunction{
+		Name:      "bash_background",
+		Arguments: `{"command":"sleep 10"}`,
+	}}
+
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, call)
+	msg := cmd()
+
+	result, ok := msg.(toolResultMsg)
+	if !ok {
+		t.Fatalf("expected toolResultMsg for a hook-blocked call, got %T", msg)
+	}
+	if !result.result.IsError || !strings.Contains(result.result.Content, "blocked") {
+		t.Errorf("result = %+v, want it blocked with the hook's reason", result.result)
+	}
+}
+
+func TestExecuteToolBashBackgroundAllowedByPreHookReturnsBatch(t *testing.T) {
+	dir := t.TempDir()
+
+	hooksCfg := hooks.Config{}
+	hooksCfg.Hooks.PreToolUse = []hooks.Hook{
+		{Match: "bash_background", Command: "exit 0"},
+	}
+
+	call := agent.ToolCall{ID: "call_1", Function: agent.ToolCallFunction{
+		Name:      "bash_background",
+		Arguments: `{"command":"echo hi"}`,
+	}}
+
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, call)
+	msg := cmd()
+
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected tea.BatchMsg once the preToolUse hook allows it, got %T", msg)
+	}
+	if len(batch) != 3 {
+		t.Errorf("got %d sub-commands, want 3", len(batch))
 	}
 }

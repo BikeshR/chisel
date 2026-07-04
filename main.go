@@ -97,7 +97,14 @@ func main() {
 	client.SetSkills(skills)
 	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, memUser, memProject, customCommands, checkpointStore, skills, resumed, savedAt)
 
-	if _, err := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run(); err != nil {
+	finalModel, err := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
+	// A still-running bash_background command has its own context,
+	// deliberately independent of any turn's — nothing else stops it
+	// when chisel exits, so this is the one place that does.
+	if m, ok := finalModel.(tui.Model); ok {
+		m.CancelBackgroundTasks()
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "chisel:", err)
 		os.Exit(1)
 	}

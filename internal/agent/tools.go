@@ -72,7 +72,7 @@ func (r ToolResult) ToMessage() Message {
 // is not.
 func NeedsPermission(call ToolCall) bool {
 	switch call.Function.Name {
-	case "bash":
+	case "bash", "bash_background":
 		return true
 	case "str_replace_based_edit_tool":
 		var in struct {
@@ -98,6 +98,12 @@ func Summarize(call ToolCall) string {
 			return "bash (restart session)"
 		}
 		return "run: " + in.Command
+	case "bash_background":
+		var in struct {
+			Command string `json:"command"`
+		}
+		_ = json.Unmarshal(call.input(), &in)
+		return "run in background: " + in.Command
 	case "str_replace_based_edit_tool":
 		var in struct {
 			Command string `json:"command"`

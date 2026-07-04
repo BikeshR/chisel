@@ -116,6 +116,13 @@ type Model struct {
 	checkpoints     []checkpointRecord
 	pendingRewind   *checkpointRecord
 
+	// backgroundTasks tracks commands started via bash_background,
+	// keyed by task ID — see background.go. Independent of any turn:
+	// a task's own context isn't cancelled by esc or a turn ending,
+	// only by CancelBackgroundTasks (chisel exiting) or the command
+	// finishing on its own.
+	backgroundTasks map[string]*backgroundTask
+
 	// streamLineIdx is the index into entries of the assistant line
 	// currently being built from streamed text deltas, or -1 if none is
 	// in progress.
@@ -362,6 +369,29 @@ func (m *Model) endStreamLine() {
 // entirely — accepted for the simplicity of not needing a second async
 // round-trip before every permission decision.
 func executeTool(ctx context.Context, workDir, model string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, skills map[string]skill.Skill, call agent.ToolCall) tea.Cmd {
+	// bash_background needs to return a tea.Batch (the "started" result,
+	// a record for Update to track, and a watcher that fires much
+	// later, whenever the command actually finishes) rather than a
+	// single Msg — outside the uniform "run it, get one result back"
+	// shape every other case here follows, so it's split out before the
+	// closure below rather than squeezed into it. preToolUse hooks
+	// still apply (still an arbitrary shell command); postToolUse
+	// doesn't, since there's no sensible way to run one against output
+	// that isn't available until long after this call returns.
+	if call.Function.Name == "bash_background" {
+		return func() tea.Msg {
+			path := toolPath(call)
+			blocked, reason, err := hooks.RunPreToolUse(ctx, workDir, hooksCfg.Hooks.PreToolUse, call.Function.Name, call.Function.Arguments, path)
+			if err != nil {
+				return toolResultMsg{result: agent.ToolResult{ID: call.ID, Content: "pre-tool-use hook: " + err.Error(), IsError: true}}
+			}
+			if blocked {
+				return toolResultMsg{result: agent.ToolResult{ID: call.ID, Content: "Blocked by a preToolUse hook: " + reason, IsError: true}}
+			}
+			return startBackgroundTask(workDir, call)()
+		}
+	}
+
 	return func() tea.Msg {
 		path := toolPath(call)
 

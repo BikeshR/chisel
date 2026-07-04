@@ -28,6 +28,7 @@ func TestNeedsPermission(t *testing.T) {
 	}{
 		{"bash always needs permission", call("bash", `{"command":"ls"}`), true},
 		{"bash restart still needs permission", call("bash", `{"restart":true}`), true},
+		{"bash_background needs permission", call("bash_background", `{"command":"sleep 10"}`), true},
 		{"editor view is read-only", call("str_replace_based_edit_tool", `{"command":"view","path":"a.go"}`), false},
 		{"editor create needs permission", call("str_replace_based_edit_tool", `{"command":"create","path":"a.go"}`), true},
 		{"editor str_replace needs permission", call("str_replace_based_edit_tool", `{"command":"str_replace","path":"a.go"}`), true},
@@ -52,6 +53,7 @@ func TestSummarize(t *testing.T) {
 	}{
 		{"bash command", call("bash", `{"command":"go test ./..."}`), "run: go test ./..."},
 		{"bash restart", call("bash", `{"restart":true}`), "bash (restart session)"},
+		{"bash_background command", call("bash_background", `{"command":"npm run dev"}`), "run in background: npm run dev"},
 		{"editor command", call("str_replace_based_edit_tool", `{"command":"create","path":"foo.go"}`), "create foo.go"},
 		{"unknown tool falls back to name", call("mystery", `{}`), "mystery"},
 	}

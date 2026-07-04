@@ -79,6 +79,14 @@ func allowlistKey(call agent.ToolCall) (key string, ok bool) {
 			return "", false
 		}
 		return "bash:" + in.Command, true
+	case call.Function.Name == "bash_background":
+		var in struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &in); err != nil || in.Command == "" {
+			return "", false
+		}
+		return "bash_background:" + in.Command, true
 	case mcp.IsToolName(call.Function.Name):
 		return "mcp:" + call.Function.Name, true
 	default:

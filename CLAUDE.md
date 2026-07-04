@@ -242,3 +242,27 @@ append-only, so nothing is actually destroyed by rewinding past it,
 just no longer on the current line of history; a later `Restore` back
 to that same hash still works, and `internal/checkpoint/checkpoint_test.go`
 proves this against a real git subprocess rather than assuming it.
+
+**A tool that needs to outlive its own turn can't use `agent.Execute`'s
+synchronous contract — it has to split into an immediate result plus an
+independent watcher, composed with `tea.Batch`.** `bash_background`
+(`internal/tui/background.go`) is intercepted in `executeTool` before
+it would otherwise reach `agent.Execute` — the same interception point
+MCP calls already use there — because `Execute`'s "run it, get one
+result back" shape can't express "started; will finish, and matter,
+much later." `startBackgroundTask` returns `tea.Batch` of three Cmds:
+the "started" tool result (so the model's own turn continues without
+waiting), a `backgroundTaskStartedMsg` for `Update` to record in
+`Model.backgroundTasks`, and a watcher Cmd that blocks on the
+subprocess's own result channel and fires `backgroundTaskDoneMsg`
+whenever it actually finishes — independent of whatever turn or state
+chisel is in by then, the same way a permission prompt or turn
+completion can interrupt at any point. The task's own `context` is
+deliberately separate from `newTurnContext`'s (turn-scoped, cancelled by
+esc) — the whole point is surviving past the turn that started it;
+`Model.CancelBackgroundTasks` (called once, on exit, from `main.go`) is
+the only thing that stops a still-running one, mirroring
+`BashSession.stop`'s `Setpgid`-plus-negative-PID-kill so a background
+command that spawns its own children doesn't get orphaned either.
+Verified live, not assumed: a real `sleep 30`, confirmed dead within 5
+seconds of calling the cancel path.

@@ -60,8 +60,26 @@ func (m Model) statusLine() string {
 		queued = dimStyle.Render(fmt.Sprintf("%d queued", n)) + " · "
 	}
 
-	return fmt.Sprintf(" %s%s%s%s · context %s · spent %s in / %s out · ctrl+c to quit",
-		plan, mcpWarning, queued, m.client.ModelName(), context, formatTokenCount(m.tokensIn), formatTokenCount(m.tokensOut))
+	background := ""
+	if n := runningBackgroundCount(m.backgroundTasks); n > 0 {
+		background = dimStyle.Render(fmt.Sprintf("%d bg running", n)) + " · "
+	}
+
+	return fmt.Sprintf(" %s%s%s%s%s · context %s · spent %s in / %s out · ctrl+c to quit",
+		plan, mcpWarning, queued, background, m.client.ModelName(), context, formatTokenCount(m.tokensIn), formatTokenCount(m.tokensOut))
+}
+
+// runningBackgroundCount counts how many background tasks are still
+// running — shown in the status bar as a live-at-a-glance indicator,
+// the same reasoning as brokenMCPCount below.
+func runningBackgroundCount(tasks map[string]*backgroundTask) int {
+	n := 0
+	for _, t := range tasks {
+		if t.running {
+			n++
+		}
+	}
+	return n
 }
 
 // brokenMCPCount counts how many of statuses are currently broken —

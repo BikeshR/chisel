@@ -64,6 +64,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case checkpointCreatedMsg:
 		return m.handleCheckpointCreated(msg), nil
 
+	case backgroundTaskStartedMsg:
+		return m.handleBackgroundTaskStarted(msg), nil
+
+	case backgroundTaskDoneMsg:
+		return m.handleBackgroundTaskDone(msg)
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)

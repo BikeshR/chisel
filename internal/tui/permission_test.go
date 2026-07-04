@@ -74,6 +74,17 @@ func TestAllowlistKeyExcludesEdits(t *testing.T) {
 	}
 }
 
+func TestAllowlistKeyForBashBackground(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash_background", Arguments: `{"command":"npm run dev"}`}}
+	key, ok := allowlistKey(call)
+	if !ok {
+		t.Fatal("expected bash_background to support allowlisting")
+	}
+	if key != "bash_background:npm run dev" {
+		t.Errorf("key = %q", key)
+	}
+}
+
 func TestAllowlistKeyForMCPTool(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "mcp__github__create_issue", Arguments: `{}`}}
 	key, ok := allowlistKey(call)

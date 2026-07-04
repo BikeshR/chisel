@@ -8,6 +8,7 @@ package agent
 func buildTools() []Tool {
 	return []Tool{
 		bashTool(),
+		bashBackgroundTool(),
 		editorTool(),
 		globTool(),
 		grepTool(),
@@ -54,6 +55,26 @@ func bashTool() Tool {
 						"description": "Set true to restart the shell session instead of running a command",
 					},
 				},
+			},
+		},
+	}
+}
+
+func bashBackgroundTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "bash_background",
+			Description: "Start a long-running bash command (a dev server, a build watcher, a slow test suite) without blocking the conversation on it. Returns immediately with a task ID. The command's full output is automatically added to the conversation, and the user is notified, once it actually finishes — you don't need a separate way to check on it. Use the regular bash tool instead for anything that finishes quickly; this adds real overhead (a separate process, notification) that's only worth it for something genuinely long-running.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": map[string]any{
+						"type":        "string",
+						"description": "The bash command to run in the background",
+					},
+				},
+				"required": []string{"command"},
 			},
 		},
 	}
