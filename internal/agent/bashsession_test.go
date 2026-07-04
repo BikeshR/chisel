@@ -58,6 +58,71 @@ func TestBashSessionCdPersists(t *testing.T) {
 	}
 }
 
+func TestBashSessionCwdTracksActualDirectory(t *testing.T) {
+	workDir := t.TempDir()
+	sub := filepath.Join(workDir, "subdir")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewBashSession(workDir)
+	defer s.Close()
+
+	if got := s.Cwd(); got != "" {
+		t.Errorf("Cwd() before any command = %q, want empty", got)
+	}
+
+	if _, err := s.Run(context.Background(), "echo hi", false); err != nil {
+		t.Fatalf("echo: %v", err)
+	}
+	gotDir, err := filepath.EvalSymlinks(s.Cwd())
+	if err != nil {
+		t.Fatalf("resolve Cwd() %q: %v", s.Cwd(), err)
+	}
+	wantDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotDir != wantDir {
+		t.Errorf("Cwd() after a plain command = %q, want workDir %q", gotDir, wantDir)
+	}
+
+	if _, err := s.Run(context.Background(), "cd subdir", false); err != nil {
+		t.Fatalf("cd: %v", err)
+	}
+	gotDir, err = filepath.EvalSymlinks(s.Cwd())
+	if err != nil {
+		t.Fatalf("resolve Cwd() %q: %v", s.Cwd(), err)
+	}
+	wantDir, err = filepath.EvalSymlinks(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotDir != wantDir {
+		t.Errorf("Cwd() after cd = %q, want %q", gotDir, wantDir)
+	}
+}
+
+func TestBashSessionCwdResetsOnRestart(t *testing.T) {
+	workDir := t.TempDir()
+	s := NewBashSession(workDir)
+	defer s.Close()
+
+	if _, err := s.Run(context.Background(), "echo hi", false); err != nil {
+		t.Fatal(err)
+	}
+	if s.Cwd() == "" {
+		t.Fatal("expected Cwd() to be set after a command")
+	}
+
+	if _, err := s.Run(context.Background(), "", true); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if got := s.Cwd(); got != "" {
+		t.Errorf("Cwd() after restart = %q, want empty", got)
+	}
+}
+
 func TestBashSessionEnvPersists(t *testing.T) {
 	s := NewBashSession(t.TempDir())
 	defer s.Close()

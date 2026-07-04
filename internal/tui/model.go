@@ -58,6 +58,17 @@ type Model struct {
 	pendingUses    []agent.ToolCall
 	pendingResults []agent.Message // one "tool" role message per completed call
 
+	// sessionAllowlist remembers "a" (always-allow) decisions from the
+	// permission prompt for the rest of this session — see
+	// permission.go's allowlistKey for what's eligible and why. In
+	// memory only; nothing here is meant to persist across restarts.
+	sessionAllowlist map[string]bool
+	// awaitingDenialReason is set when "n" denies a tool call — instead
+	// of immediately resending a canned denial message, the next thing
+	// the user types (or nothing, if they just hit enter) becomes the
+	// reason fed back to the model. See submit() in update.go.
+	awaitingDenialReason bool
+
 	// streamLineIdx is the index into entries of the assistant line
 	// currently being built from streamed text deltas, or -1 if none is
 	// in progress.
@@ -312,18 +323,6 @@ func summarizeCall(call agent.ToolCall) string {
 		return fmt.Sprintf("%s: %s", server, tool)
 	}
 	return agent.Summarize(call)
-}
-
-// needsPermission reports whether call must be confirmed before running.
-// Every MCP-sourced tool always needs permission — chisel has no way to
-// know what an arbitrary server's tool actually does, so it can't apply
-// the same read-only auto-allow heuristic agent.NeedsPermission uses for
-// its own fixed tools.
-func needsPermission(call agent.ToolCall) bool {
-	if mcp.IsToolName(call.Function.Name) {
-		return true
-	}
-	return agent.NeedsPermission(call)
 }
 
 // saveSession persists messages as the current session for workDir. A

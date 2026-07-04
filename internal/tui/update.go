@@ -92,12 +92,41 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch msg.String() {
-		case "y", "Y", "enter":
+		case "y", "Y":
+			// Deliberately not also bound to enter — a permission prompt
+			// following right after typing and hitting enter to submit
+			// the message that triggered it is exactly the pattern that
+			// makes an enter-approves binding dangerous: a reflexive
+			// enter can approve a bash command the user never actually read.
 			call := m.pendingUses[0]
 			m.state = stateExecutingTool
 			m.appendLine(dimStyle.Render("  → approved"))
 			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, call)
-		case "n", "N", "esc":
+		case "a", "A":
+			call := m.pendingUses[0]
+			if key, ok := allowlistKey(call); ok {
+				if m.sessionAllowlist == nil {
+					m.sessionAllowlist = make(map[string]bool)
+				}
+				m.sessionAllowlist[key] = true
+			}
+			m.state = stateExecutingTool
+			m.appendLine(dimStyle.Render("  → approved (always allow for this session)"))
+			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, call)
+		case "n", "N":
+			// Denying isn't a dead end: rather than immediately resending
+			// a canned "denied" message and letting the model guess why,
+			// drop back to stateInput with the denial queued — whatever
+			// the user types next (or nothing) becomes the reason fed
+			// back, resolved by submit().
+			m.state = stateInput
+			m.awaitingDenialReason = true
+			m.appendLine(dimStyle.Render("  → denied — say what to do instead, or press enter to just deny"))
+			return m, nil
+		case "esc":
+			// A blunter, immediate deny — no reason prompt — for when the
+			// user just wants out, matching esc's meaning elsewhere in
+			// the app (abandon this, don't ask more questions about it).
 			return m.handleToolResult(agent.ToolResult{
 				ID:      m.pendingUses[0].ID,
 				Content: "The user denied permission for this action.",
@@ -168,10 +197,27 @@ func (m *Model) handleScrollKey(msg tea.KeyMsg) bool {
 
 func (m Model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSuffix(m.textArea.Value(), "\n")
+	m.textArea.Reset()
+
+	// A denial from the permission prompt is waiting on a reason (or an
+	// explicit "no reason" via an empty submission) — resolve it here
+	// rather than treating this as a fresh message, regardless of
+	// whether text is empty or looks like a "/" command.
+	if m.awaitingDenialReason {
+		m.awaitingDenialReason = false
+		if len(m.pendingUses) == 0 {
+			return m, nil
+		}
+		reason := "The user denied permission for this action."
+		if text != "" {
+			reason += " " + text
+		}
+		return m.handleToolResult(agent.ToolResult{ID: m.pendingUses[0].ID, Content: reason, IsError: true})
+	}
+
 	if text == "" {
 		return m, nil
 	}
-	m.textArea.Reset()
 
 	if strings.HasPrefix(text, "/") {
 		var cmd tea.Cmd
@@ -278,34 +324,37 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	}
 	call := m.pendingUses[0]
 
-	// Plan mode hard-denies anything that would otherwise need permission
-	// — not just a prompt-level instruction the model might ignore. A
-	// call that's already auto-allowed (glob, grep, editor view) is
-	// read-only by definition and stays allowed; that's the whole point
-	// of "read-only planning".
-	if needsPermission(call) && m.client.PlanMode() {
-		m.appendLine(errorStyle.Render("✗ blocked (plan mode): " + summarizeCall(call)))
-		return m.handleToolResult(agent.ToolResult{
-			ID:      call.ID,
-			Content: "Not run — chisel is in plan mode, which only allows read-only exploration. Describe this as part of your plan instead, then stop; the user will exit plan mode before you make any changes.",
-			IsError: true,
-		})
-	}
+	switch decision, reason := decidePermission(call, m.client.PlanMode(), m.sessionAllowlist); decision {
+	case permissionDeny:
+		return m.handleToolResult(agent.ToolResult{ID: call.ID, Content: reason, IsError: true})
 
-	if needsPermission(call) {
+	case permissionAsk:
 		m.endTurn() // nothing async is in flight while waiting on a y/n decision
 		m.state = stateAwaitingPermission
-		prompt := fmt.Sprintf("allow %s?  [y/n]", summarizeCall(call))
+
+		options := "[y/n]"
+		if _, allowlistable := allowlistKey(call); allowlistable {
+			options = "[y/n/a]"
+		}
+
+		prompt := fmt.Sprintf("allow %s?  %s", summarizeCall(call), options)
 		if diff, ok := agent.PreviewEdit(m.workDir, call); ok {
-			prompt = fmt.Sprintf("allow %s?\n\n%s\n[y/n]", summarizeCall(call), colorizeDiff(diff))
+			prompt = fmt.Sprintf("allow %s?\n\n%s\n%s", summarizeCall(call), colorizeDiff(diff), options)
+		} else if args := mcpCallArgsPreview(call); args != "" {
+			prompt = fmt.Sprintf("allow %s?\n\n%s\n%s", summarizeCall(call), args, options)
+		} else if call.Function.Name == "bash" && m.bash != nil {
+			if cwd := m.bash.Cwd(); cwd != "" && cwd != m.workDir {
+				prompt = fmt.Sprintf("allow %s?  (in %s)  %s", summarizeCall(call), cwd, options)
+			}
 		}
 		m.appendLine(permissionStyle.Render(prompt))
 		return m, notifyIdle("chisel needs your permission")
-	}
 
-	m.state = stateExecutingTool
-	m.appendLine(toolStyle.Render("  " + summarizeCall(call)))
-	return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, call)
+	default: // permissionAllow
+		m.state = stateExecutingTool
+		m.appendLine(toolStyle.Render("  " + summarizeCall(call)))
+		return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, call)
+	}
 }
 
 func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {

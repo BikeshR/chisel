@@ -41,6 +41,11 @@ type BashSession struct {
 	stdin  io.WriteCloser
 	reader *bufio.Reader
 	marker string
+	// cwd is the shell's current directory, refreshed after every
+	// command — so a caller (the permission prompt, in particular) can
+	// tell whether `cd` has taken the persistent shell somewhere other
+	// than workDir without needing its own round-trip through the shell.
+	cwd string
 }
 
 // NewBashSession creates a session rooted at workDir. The underlying shell
@@ -83,6 +88,16 @@ func (s *BashSession) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stop()
+}
+
+// Cwd returns the shell's current directory as of the last command run,
+// or "" if no command has ever run (the shell hasn't started, or was
+// just restarted). Safe to call concurrently with Run — it takes the
+// same lock.
+func (s *BashSession) Cwd() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cwd
 }
 
 func (s *BashSession) start() error {
@@ -132,6 +147,7 @@ func (s *BashSession) stop() {
 	s.cmd = nil
 	s.stdin = nil
 	s.reader = nil
+	s.cwd = ""
 }
 
 // run sends one command followed by a sentinel line carrying the shell's
@@ -140,7 +156,13 @@ func (s *BashSession) stop() {
 // not as a Go error — only a broken session (can't write, EOF, timeout)
 // is an error here.
 func (s *BashSession) run(ctx context.Context, command string) (string, error) {
-	if _, err := fmt.Fprintf(s.stdin, "%s\necho \"%s$?\"\n", command, s.marker); err != nil {
+	// $PWD rides along on the same sentinel line as the exit code — one
+	// extra round-trip-free way to keep s.cwd current after every
+	// command, not just ones that look like `cd`. Splitting on the
+	// first ':' is unambiguous even if $PWD itself contains a colon
+	// (rare, but not impossible): the exit code is always all-digits, so
+	// it can never contain the delimiter itself.
+	if _, err := fmt.Fprintf(s.stdin, "%s\necho \"%s$?:$PWD\"\n", command, s.marker); err != nil {
 		return "", fmt.Errorf("write command: %w", err)
 	}
 
@@ -157,6 +179,7 @@ func (s *BashSession) run(ctx context.Context, command string) (string, error) {
 	type result struct {
 		output string
 		code   int
+		cwd    string
 		err    error
 	}
 	done := make(chan result, 1)
@@ -165,13 +188,14 @@ func (s *BashSession) run(ctx context.Context, command string) (string, error) {
 		var out strings.Builder
 		for {
 			line, readErr := reader.ReadString('\n')
-			if code, ok := strings.CutPrefix(strings.TrimRight(line, "\n"), marker); ok {
-				n, perr := strconv.Atoi(code)
+			if rest, ok := strings.CutPrefix(strings.TrimRight(line, "\n"), marker); ok {
+				codeStr, cwd, _ := strings.Cut(rest, ":")
+				n, perr := strconv.Atoi(codeStr)
 				if perr != nil {
-					done <- result{output: out.String(), err: fmt.Errorf("parse exit code from %q: %w", code, perr)}
+					done <- result{output: out.String(), err: fmt.Errorf("parse exit code from %q: %w", codeStr, perr)}
 					return
 				}
-				done <- result{output: out.String(), code: n}
+				done <- result{output: out.String(), code: n, cwd: cwd}
 				return
 			}
 			out.WriteString(line)
@@ -189,6 +213,9 @@ func (s *BashSession) run(ctx context.Context, command string) (string, error) {
 	case r := <-done:
 		if r.err != nil {
 			return r.output, r.err
+		}
+		if r.cwd != "" {
+			s.cwd = r.cwd
 		}
 		return formatBashOutput(r.output, r.code), nil
 	case <-timeoutCtx.Done():

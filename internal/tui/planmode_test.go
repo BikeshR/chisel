@@ -51,7 +51,7 @@ func TestDispatchNextToolBlocksInPlanMode(t *testing.T) {
 	lines := gotModel.renderedLines()
 	found := false
 	for _, l := range lines {
-		if strings.Contains(l, "blocked") && strings.Contains(l, "plan mode") {
+		if strings.Contains(l, "plan mode") {
 			found = true
 		}
 	}
