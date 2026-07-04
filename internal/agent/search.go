@@ -16,8 +16,21 @@ import (
 const grepResultLimit = 200
 const globResultLimit = 200
 
+// skipDirs is a fixed list of directory names grep/glob never descend
+// into — build output and dependency trees that would otherwise flood
+// results in most non-Go repos (the original four entries here covered
+// Go/Node/Python well enough, but nothing else). This is a coarser tool
+// than respecting .gitignore properly (arbitrary patterns, negation,
+// per-directory files) — that would catch more, and precisely what a
+// given project actually wants excluded, but at real implementation
+// and correctness risk for a search tool; a fixed list of well-known
+// noisy directory names is the deliberately simpler bar chisel clears
+// today.
 var skipDirs = map[string]bool{
-	".git": true, "node_modules": true, "vendor": true, ".venv": true,
+	".git": true, "node_modules": true, "vendor": true, ".venv": true, "venv": true,
+	"dist": true, "build": true, "target": true, ".next": true, "__pycache__": true,
+	".pytest_cache": true, ".mypy_cache": true, ".tox": true, ".gradle": true,
+	".terraform": true, "bower_components": true, ".cache": true, "coverage": true,
 }
 
 func globTool() Tool {

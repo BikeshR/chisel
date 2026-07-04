@@ -151,6 +151,48 @@ func TestRunGlobExcludesSkipDirs(t *testing.T) {
 	}
 }
 
+// TestSkipDirsCoversCommonNonGoBuildDirectories is the regression test
+// for a review finding: the original four-entry skipDirs list (.git,
+// node_modules, vendor, .venv) covered Go/Node/Python well enough, but
+// build output from most other ecosystems — a JS bundler's dist/build,
+// Rust/Maven's target, Next.js's .next, Python's __pycache__ — would
+// otherwise flood grep/glob results in those repos.
+func TestSkipDirsCoversCommonNonGoBuildDirectories(t *testing.T) {
+	for _, dir := range []string{"dist", "build", "target", ".next", "__pycache__"} {
+		if !skipDirs[dir] {
+			t.Errorf("skipDirs missing %q", dir)
+		}
+	}
+}
+
+func TestRunGrepExcludesSkipDirs(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workDir, "dist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "dist", "bundle.js"), []byte("findme"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "source.js"), []byte("findme"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	input, _ := json.Marshal(struct {
+		Pattern string `json:"pattern"`
+	}{Pattern: "findme"})
+
+	out, err := runGrep(workDir, input)
+	if err != nil {
+		t.Fatalf("runGrep: %v", err)
+	}
+	if strings.Contains(out, "dist") {
+		t.Errorf("output = %q, want dist/ excluded from the walk", out)
+	}
+	if !strings.Contains(out, "source.js") {
+		t.Errorf("output = %q, want source.js (outside dist) found", out)
+	}
+}
+
 func TestRunGlobCapsResults(t *testing.T) {
 	workDir := t.TempDir()
 	for i := 0; i < globResultLimit+25; i++ {
