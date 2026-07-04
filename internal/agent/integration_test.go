@@ -83,7 +83,7 @@ func TestIntegrationToolCalling(t *testing.T) {
 		t.Fatalf("expected the glob tool, got %q", tc.Function.Name)
 	}
 
-	result := Execute(context.Background(), ".", tc)
+	result := Execute(context.Background(), ".", tc, nil) // glob never touches the bash session
 	if result.IsError {
 		t.Fatalf("tool execution failed: %s", result.Content)
 	}

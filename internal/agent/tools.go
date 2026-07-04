@@ -92,14 +92,16 @@ func Summarize(call ToolCall) string {
 }
 
 // Execute dispatches a call to its handler. workDir scopes every filesystem
-// and shell operation — chisel never touches anything outside it.
-func Execute(ctx context.Context, workDir string, call ToolCall) ToolResult {
+// operation — chisel never touches anything outside it. bash runs against
+// the given persistent session (nil is only valid if the call can't
+// possibly be "bash" — every real caller should pass a live session).
+func Execute(ctx context.Context, workDir string, call ToolCall, bash *BashSession) ToolResult {
 	var content string
 	var err error
 
 	switch call.Function.Name {
 	case "bash":
-		content, err = runBash(ctx, workDir, call.input())
+		content, err = runBash(ctx, bash, call.input())
 	case "str_replace_based_edit_tool":
 		content, err = runEditor(workDir, call.input())
 	case "glob":

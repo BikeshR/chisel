@@ -213,7 +213,7 @@ Four phases, each a genuinely usable tool in its own right.
 - ~~Model health-check~~ — **done**: `/model check [id]` (`internal/tui/commands.go`) sends a minimal request through chisel's real request shape (system prompt + tools included) and reports pass/fail with the actual reply or error. Caught a real, useful finding immediately: `deepseek-v4-flash` and `kimi-k2.6`, both recorded as failing in §4 earlier in July 2026, now work — confirms this needed to be a live check, not a maintained static list.
 - Session persistence — save and resume transcripts to disk
 - Git awareness: show a diff before writing, optionally auto-commit like Aider
-- Persistent bash session (currently each `bash` call is a fresh subprocess — no `cd`/env across calls)
+- ~~Persistent bash session~~ — **done**: `agent.BashSession` (`internal/agent/bashsession.go`) runs one long-lived `sh` process for the life of the TUI session (owned by `main.go`, independent of `/model` switches) instead of a fresh subprocess per call, so `cd` and exported env vars now carry across calls. Completion is detected via a random sentinel line echoed after each command, carrying its exit code; a 2-minute per-command timeout kills and drops the session (recreated lazily on the next call) rather than risking a desynced read. `{"restart": true}` (already part of the tool's schema) now does something real: kills the shell and starts a fresh one rooted back at workDir.
 
 **How chisel got here — history worth keeping:**
 

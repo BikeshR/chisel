@@ -34,7 +34,10 @@ func main() {
 	}
 
 	client := agent.New(model)
-	tuiModel := tui.New(client, workDir)
+	bash := agent.NewBashSession(workDir)
+	defer bash.Close()
+
+	tuiModel := tui.New(client, workDir, bash)
 
 	if _, err := tea.NewProgram(tuiModel, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "chisel:", err)

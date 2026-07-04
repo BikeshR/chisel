@@ -27,6 +27,7 @@ const (
 type Model struct {
 	client  *agent.Client
 	workDir string
+	bash    *agent.BashSession
 
 	messages []agent.Message
 	lines    []string // rendered transcript, newest last
@@ -52,7 +53,10 @@ type Model struct {
 }
 
 // New builds the initial Model for a chisel session rooted at workDir.
-func New(client *agent.Client, workDir string) Model {
+// bash is owned by the caller (main.go), not created here, so its
+// lifecycle (in particular, closing the underlying shell on exit) doesn't
+// depend on anything inside this package.
+func New(client *agent.Client, workDir string, bash *agent.BashSession) Model {
 	ti := textinput.New()
 	ti.Placeholder = "ask chisel to do something…"
 	ti.Focus()
@@ -63,6 +67,7 @@ func New(client *agent.Client, workDir string) Model {
 	return Model{
 		client:        client,
 		workDir:       workDir,
+		bash:          bash,
 		textInput:     ti,
 		viewport:      viewport.New(80, 20),
 		spinner:       sp,
@@ -113,8 +118,8 @@ func (m *Model) endStreamLine() {
 	m.streamText = ""
 }
 
-func executeTool(workDir string, call agent.ToolCall) tea.Cmd {
+func executeTool(workDir string, bash *agent.BashSession, call agent.ToolCall) tea.Cmd {
 	return func() tea.Msg {
-		return toolResultMsg{result: agent.Execute(context.Background(), workDir, call)}
+		return toolResultMsg{result: agent.Execute(context.Background(), workDir, call, bash)}
 	}
 }
