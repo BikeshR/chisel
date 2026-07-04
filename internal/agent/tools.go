@@ -169,6 +169,23 @@ func truncateOutput(s string) string {
 	return string(runes[:maxToolOutputChars]) + fmt.Sprintf("\n… truncated (%d more characters)", len(runes)-maxToolOutputChars)
 }
 
+// ReadFileInWorkDir reads path relative to workDir, resolved and
+// validated the same way every filesystem tool's own paths are (see
+// resolveInWorkDir) — exported for the TUI's @file reference feature,
+// which reads a file directly rather than through a model-issued tool
+// call, but still must never be able to read outside workDir.
+func ReadFileInWorkDir(workDir, path string) (string, error) {
+	resolved, err := resolveInWorkDir(workDir, path)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 // resolveInWorkDir resolves a model-supplied path against workDir and
 // rejects anything that would escape it (absolute paths elsewhere, `..`
 // traversal, or a symlink pointing outside). Non-existent paths (e.g. a

@@ -142,6 +142,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.KeyEnter && !msg.Alt {
 			return m.submit()
 		}
+		if msg.Type == tea.KeyTab {
+			m.completeFileReferenceInInput()
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.textArea, cmd = m.textArea.Update(msg)
 		return m, cmd
@@ -262,7 +266,11 @@ func (m Model) submitText(text string) (Model, tea.Cmd) {
 
 	m.syncMCPHealth()
 
-	m.messages = append(m.messages, agent.Message{Role: "user", Content: text})
+	// The model sees @path expanded to the file's actual content; the
+	// transcript shows exactly what the user typed — otherwise a large
+	// injected file would turn the display into a wall of text every
+	// time one's referenced.
+	m.messages = append(m.messages, agent.Message{Role: "user", Content: expandFileReferences(m.workDir, text)})
 	m.appendLine(userStyle.Render("you  ") + text)
 	m.state = stateWaitingModel
 

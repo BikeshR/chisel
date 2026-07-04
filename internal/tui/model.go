@@ -161,7 +161,7 @@ func interruptibleErrorText(err error) string {
 // the content itself was already handed to the client via SetMemory.
 func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, resumed []agent.Message, savedAt time.Time) Model {
 	ta := textarea.New()
-	ta.Placeholder = "ask chisel to do something… (alt+enter for a new line, /help for commands)"
+	ta.Placeholder = "ask chisel to do something… (alt+enter for a new line, @path to reference a file, /help for commands)"
 	ta.Focus()
 	ta.CharLimit = 0 // unbounded — the whole point is supporting long pastes
 	ta.ShowLineNumbers = false

@@ -205,3 +205,25 @@ func TestRunEditorCreateOverwriteDoesNotLeaveBackupFile(t *testing.T) {
 		t.Error("a .bak file was created — that behavior should be gone")
 	}
 }
+
+func TestReadFileInWorkDir(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "notes.txt"), []byte("hello there"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFileInWorkDir(workDir, "notes.txt")
+	if err != nil {
+		t.Fatalf("ReadFileInWorkDir: %v", err)
+	}
+	if got != "hello there" {
+		t.Errorf("got %q, want %q", got, "hello there")
+	}
+}
+
+func TestReadFileInWorkDirRejectsEscape(t *testing.T) {
+	workDir := t.TempDir()
+	if _, err := ReadFileInWorkDir(workDir, "../../etc/passwd"); err == nil {
+		t.Error("expected an error escaping the working directory")
+	}
+}
