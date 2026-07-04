@@ -79,6 +79,30 @@ func (r *Registry) Tools() []Tool {
 	return tools
 }
 
+// ServerStatus is a snapshot of one configured server's health, for
+// display (see /status in the tui package).
+type ServerStatus struct {
+	Name   string
+	Broken bool
+}
+
+// Statuses returns every running server's name and current health,
+// sorted by name for a stable display order. Safe to call on a nil
+// *Registry (reports no servers) — a test-constructed tui.Model won't
+// always have gone through tui.New, which is the only real caller that
+// guarantees a non-nil one.
+func (r *Registry) Statuses() []ServerStatus {
+	if r == nil {
+		return nil
+	}
+	out := make([]ServerStatus, 0, len(r.servers))
+	for name, s := range r.servers {
+		out = append(out, ServerStatus{Name: name, Broken: s.broken})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // IsToolName reports whether name follows chisel's mcp__server__tool
 // naming — used to route dispatch and permission checks without this
 // package needing to know about agent.ToolCall at all.

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,8 +15,8 @@ import (
 
 // handleCommand processes a "/"-prefixed line from the input box instead of
 // sending it to the model. Most commands are synchronous (nil Cmd); /model
-// check is the exception — it makes a real request, so it goes through the
-// same async Cmd/Msg path as a normal turn.
+// check and /retry are the exceptions — they make a real request, so they
+// go through the same async Cmd/Msg path as a normal turn.
 func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 	fields := strings.Fields(text)
 	switch fields[0] {
@@ -31,10 +32,101 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 		return m.handleCompactCommand()
 	case "/plan":
 		return m.handlePlanCommand(), nil
+	case "/retry":
+		return m.handleRetryCommand()
+	case "/status":
+		return m.handleStatusCommand(), nil
+	case "/help":
+		return m.handleHelpCommand(), nil
 	default:
-		m.appendLine(errorStyle.Render("unknown command: " + fields[0]))
+		m.appendLine(errorStyle.Render("unknown command: " + fields[0] + " — /help lists what's available"))
 		return m, nil
 	}
+}
+
+// helpText is shown by /help and mirrors what handleCommand actually
+// dispatches — keep the two in sync when adding or changing a command.
+const helpText = `commands:
+  /help                 show this list
+  /model [name]         show available models, or switch to name
+  /model check [name]   test a model through chisel's real request shape
+  /think                toggle showing <think> blocks in full
+  /new                  start a fresh session (clears saved history)
+  /compact              summarize the conversation to save context
+  /retry                re-send the last request after a failure
+  /git auto [on|off]    toggle auto-commit after each turn
+  /plan                 toggle plan mode (read-only exploration only)
+  /status               show workdir, session, hooks, MCP, and memory info
+
+keys:
+  enter                 submit · in a permission prompt, only y/Y approves
+  alt+enter             insert a newline while composing a message
+  esc                   interrupt a running request/tool · deny a permission prompt
+  y / n / a             approve / deny / always-allow-this-session in a permission prompt
+  pgup/pgdn, ctrl+u/d   scroll the transcript
+  ctrl+c                quit`
+
+func (m Model) handleHelpCommand() Model {
+	m.appendLine(dimStyle.Render(helpText))
+	return m
+}
+
+// handleRetryCommand re-sends the current message history — recovery
+// from a transient failure (a provider's 5xx, a dropped connection)
+// without needing to retype whatever request triggered it. No new user
+// message is appended; this is exactly what a normal turn's model
+// request does, just without adding anything new to send first.
+func (m Model) handleRetryCommand() (Model, tea.Cmd) {
+	if len(m.messages) == 0 {
+		m.appendLine(dimStyle.Render("nothing to retry yet"))
+		return m, nil
+	}
+	m.appendLine(dimStyle.Render("retrying…"))
+	m.state = stateWaitingModel
+	ctx := m.newTurnContext()
+	return m, startStream(ctx, m.client, m.messages)
+}
+
+// handleStatusCommand reports what chisel currently has loaded —
+// almost all of which (hooks, MCP servers, memory files) is otherwise
+// only ever shown once, at startup, and then never again for the rest
+// of the session.
+func (m Model) handleStatusCommand() Model {
+	m.appendLine(dimStyle.Render("workdir: " + m.workDir))
+
+	if path, err := session.Path(m.workDir); err == nil {
+		if info, err := os.Stat(path); err == nil {
+			m.appendLine(dimStyle.Render(fmt.Sprintf("session: %s (%d messages, saved %s)", path, len(m.messages), humanizeSince(info.ModTime()))))
+		} else {
+			m.appendLine(dimStyle.Render("session: not yet saved"))
+		}
+	}
+
+	if m.hooks.HasAny() {
+		m.appendLine(dimStyle.Render(fmt.Sprintf("hooks: %d preToolUse, %d postToolUse", len(m.hooks.Hooks.PreToolUse), len(m.hooks.Hooks.PostToolUse))))
+	} else {
+		m.appendLine(dimStyle.Render("hooks: none configured"))
+	}
+
+	if statuses := m.mcp.Statuses(); len(statuses) == 0 {
+		m.appendLine(dimStyle.Render("mcp: no servers configured"))
+	} else {
+		for _, s := range statuses {
+			state := "ok"
+			if s.Broken {
+				state = "broken"
+			}
+			m.appendLine(dimStyle.Render(fmt.Sprintf("mcp: %s (%s)", s.Name, state)))
+		}
+	}
+
+	if m.memUser || m.memProject {
+		m.appendLine(dimStyle.Render("memory: " + memoryBannerText(m.memUser, m.memProject)))
+	} else {
+		m.appendLine(dimStyle.Render("memory: none loaded"))
+	}
+
+	return m
 }
 
 // handleThinkCommand toggles whether inline <think> blocks render in

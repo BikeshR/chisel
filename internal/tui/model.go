@@ -46,6 +46,11 @@ type Model struct {
 	bash    *agent.BashSession
 	mcp     *mcp.Registry
 	hooks   hooks.Config
+	// memUser/memProject record which CHISEL.md files were found at
+	// startup (see New) — kept only for /status to report later; the
+	// content itself already went to the client via SetMemory before
+	// this Model was ever built.
+	memUser, memProject bool
 
 	messages []agent.Message
 	entries  []entry // transcript, newest last — see transcript.go
@@ -145,7 +150,7 @@ func interruptibleErrorText(err error) string {
 // the content itself was already handed to the client via SetMemory.
 func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, resumed []agent.Message, savedAt time.Time) Model {
 	ta := textarea.New()
-	ta.Placeholder = "ask chisel to do something… (alt+enter for a new line)"
+	ta.Placeholder = "ask chisel to do something… (alt+enter for a new line, /help for commands)"
 	ta.Focus()
 	ta.CharLimit = 0 // unbounded — the whole point is supporting long pastes
 	ta.ShowLineNumbers = false
@@ -167,6 +172,8 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 		bash:          bash,
 		mcp:           mcpRegistry,
 		hooks:         hooksCfg,
+		memUser:       memUser,
+		memProject:    memProject,
 		messages:      resumed,
 		textArea:      ta,
 		viewport:      vp,
