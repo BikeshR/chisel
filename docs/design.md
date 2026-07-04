@@ -206,7 +206,7 @@ Four phases, each a genuinely usable tool in its own right.
 - A basic permission gate — ask before bash or file edits, auto-allow read-only tools
 - Bubbletea TUI: scrollable conversation pane, status line (model, token spend), inline approve/deny prompt
 
-### Phase 2 — Daily driver — **mostly done**
+### Phase 2 — Daily driver — **done**
 
 - ~~Streamed output instead of waiting for the full response~~ — **done**: hand-rolled SSE decode, text deltas render live via a channel + `tea.Cmd` re-arm loop (`internal/tui/stream.go`)
 - ~~A config file for model choice~~ — **done**: `CHISEL_MODEL` env var (switchable at runtime with `/model`), plus an optional `~/.chisel.env` (outside the repo, never committed) for `CHISEL_API_KEY`/`CHISEL_BASE_URL`/`CHISEL_MODEL`. Working-directory scope and an allowed-commands list are still open.
