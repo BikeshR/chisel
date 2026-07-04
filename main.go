@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/hooks"
 	"github.com/BikeshR/chisel/internal/mcp"
 	"github.com/BikeshR/chisel/internal/session"
 	"github.com/BikeshR/chisel/internal/tui"
@@ -46,8 +47,13 @@ func main() {
 	}
 	client.AddTools(agentToolsFromMCP(mcpRegistry.Tools()))
 
+	hooksCfg, _, err := hooks.LoadConfig(workDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: hooks:", err)
+	}
+
 	resumed, savedAt, _ := session.Load(workDir)
-	tuiModel := tui.New(client, workDir, bash, mcpRegistry, resumed, savedAt)
+	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, resumed, savedAt)
 
 	if _, err := tea.NewProgram(tuiModel, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "chisel:", err)

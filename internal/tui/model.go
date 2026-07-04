@@ -13,6 +13,7 @@ import (
 
 	"github.com/BikeshR/chisel/internal/agent"
 	"github.com/BikeshR/chisel/internal/gitutil"
+	"github.com/BikeshR/chisel/internal/hooks"
 	"github.com/BikeshR/chisel/internal/mcp"
 	"github.com/BikeshR/chisel/internal/session"
 )
@@ -35,6 +36,7 @@ type Model struct {
 	workDir string
 	bash    *agent.BashSession
 	mcp     *mcp.Registry
+	hooks   hooks.Config
 
 	messages []agent.Message
 	lines    []string // rendered transcript, newest last
@@ -70,8 +72,9 @@ type Model struct {
 // here, so their lifecycle (closing the shell / MCP server processes on
 // exit) doesn't depend on anything inside this package. resumed and
 // savedAt come from session.Load — pass a nil/zero pair if there's
-// nothing to resume.
-func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, resumed []agent.Message, savedAt time.Time) Model {
+// nothing to resume. hooksCfg comes from hooks.LoadConfig — a zero value
+// is fine and just means no hooks configured.
+func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, resumed []agent.Message, savedAt time.Time) Model {
 	ti := textinput.New()
 	ti.Placeholder = "ask chisel to do something…"
 	ti.Focus()
@@ -84,6 +87,7 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 		workDir:       workDir,
 		bash:          bash,
 		mcp:           mcpRegistry,
+		hooks:         hooksCfg,
 		messages:      resumed,
 		textInput:     ti,
 		viewport:      viewport.New(80, 20),
@@ -144,18 +148,65 @@ func (m *Model) endStreamLine() {
 	m.streamText = ""
 }
 
-func executeTool(workDir, model string, bash *agent.BashSession, mcpRegistry *mcp.Registry, call agent.ToolCall) tea.Cmd {
+// executeTool runs a tool call's full lifecycle: preToolUse hooks (which
+// can block it outright), the call itself, then postToolUse hooks (whose
+// output, if any, is folded into the result so the model sees it). Hooks
+// run here rather than as a separate pre-permission-prompt step because
+// they're arbitrary shell commands that can take real time (up to
+// hooks.hookTimeout) — unlike plan mode's block, which is a plain boolean
+// check and cheap enough to do synchronously before the prompt even
+// appears, hooks have to go through the same async Cmd as the tool call
+// itself. The tradeoff: a hook can still block a call the user already
+// approved via the permission prompt, rather than pre-empting the prompt
+// entirely — accepted for the simplicity of not needing a second async
+// round-trip before every permission decision.
+func executeTool(workDir, model string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, call agent.ToolCall) tea.Cmd {
 	return func() tea.Msg {
+		ctx := context.Background()
+		path := toolPath(call)
+
+		blocked, reason, err := hooks.RunPreToolUse(ctx, workDir, hooksCfg.Hooks.PreToolUse, call.Function.Name, call.Function.Arguments, path)
+		if err != nil {
+			return toolResultMsg{result: agent.ToolResult{ID: call.ID, Content: "pre-tool-use hook: " + err.Error(), IsError: true}}
+		}
+		if blocked {
+			return toolResultMsg{result: agent.ToolResult{ID: call.ID, Content: "Blocked by a preToolUse hook: " + reason, IsError: true}}
+		}
+
+		var result agent.ToolResult
 		if mcp.IsToolName(call.Function.Name) {
 			args := json.RawMessage(call.Function.Arguments)
-			content, isError, err := mcpRegistry.Call(context.Background(), call.Function.Name, args)
+			content, isError, err := mcpRegistry.Call(ctx, call.Function.Name, args)
 			if err != nil {
-				return toolResultMsg{result: agent.ToolResult{ID: call.ID, Content: err.Error(), IsError: true}}
+				result = agent.ToolResult{ID: call.ID, Content: err.Error(), IsError: true}
+			} else {
+				result = agent.ToolResult{ID: call.ID, Content: content, IsError: isError}
 			}
-			return toolResultMsg{result: agent.ToolResult{ID: call.ID, Content: content, IsError: isError}}
+		} else {
+			result = agent.Execute(ctx, workDir, model, call, bash)
 		}
-		return toolResultMsg{result: agent.Execute(context.Background(), workDir, model, call, bash)}
+
+		if !result.IsError {
+			if out, err := hooks.RunPostToolUse(ctx, workDir, hooksCfg.Hooks.PostToolUse, call.Function.Name, call.Function.Arguments, path); err != nil {
+				result.Content += "\n\n(post-tool-use hook: " + err.Error() + ")"
+			} else if out != "" {
+				result.Content += "\n\n[hook] " + out
+			}
+		}
+
+		return toolResultMsg{result: result}
 	}
+}
+
+// toolPath pulls a "path" argument out of call, if it has one — chisel's
+// editor tool always does, and this stays generic (any tool with a "path"
+// argument benefits) rather than special-casing by tool name.
+func toolPath(call agent.ToolCall) string {
+	var in struct {
+		Path string `json:"path"`
+	}
+	_ = json.Unmarshal([]byte(call.Function.Arguments), &in)
+	return in.Path
 }
 
 // summarizeCall renders a permission-prompt-friendly description of call,

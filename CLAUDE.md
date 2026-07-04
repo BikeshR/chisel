@@ -139,3 +139,19 @@ mutating anything — glob, grep, and `view` (a read-only-only variant of
 the editor tool, with no create/str_replace/insert command in the schema
 at all) — so a subagent needs no permission gate in the first place;
 there's nothing to gate.
+
+**Hooks are project-scoped; everything else config-like is user-scoped —
+that split is intentional, not an inconsistency.** `internal/hooks` reads
+`.chisel/hooks.json` from the *working directory*, unlike `~/.chisel.env`
+and `~/.chisel/mcp.json`. Which hooks apply is a property of the project,
+meant to be committed with the code it lints/guards; API keys and MCP
+servers are properties of the person running chisel. Hooks run inside
+`executeTool`'s existing `tea.Cmd` (`internal/tui/model.go`) rather than
+as a separate pre-permission-prompt check like plan mode's block — a hook
+is an arbitrary shell command bounded by a real timeout (`hooks.
+hookTimeout`, 30s), not a cheap boolean, so it can't run synchronously on
+the Update goroutine the way plan mode's check does. Consequence worth
+knowing: a `preToolUse` hook can still block a call after the user already
+approved it via the permission prompt — accepted rather than adding a
+second async round-trip before every permission decision just to
+pre-empt the prompt in the rare case a hook would've blocked it anyway.

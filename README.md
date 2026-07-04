@@ -61,6 +61,30 @@ always require approval — chisel has no way to know what an arbitrary
 server's tool actually does. A server that fails to start is logged to
 stderr and skipped; chisel still runs fine with whatever did start.
 
+## Hooks
+
+List hooks in `.chisel/hooks.json` in your project — this one's
+project-scoped (meant to be committed), unlike the MCP/env config above:
+
+```json
+{
+  "hooks": {
+    "preToolUse": [
+      {"match": "str_replace_based_edit_tool", "command": "case \"$CHISEL_HOOK_PATH\" in vendor/*) exit 1;; esac"}
+    ],
+    "postToolUse": [
+      {"match": "str_replace_based_edit_tool", "command": "gofmt -l \"$CHISEL_HOOK_PATH\""}
+    ]
+  }
+}
+```
+
+`match` is a tool name or `"*"` for every call. A `preToolUse` hook that
+exits non-zero blocks the call — its stderr/stdout becomes the reason the
+model is told. A `postToolUse` hook runs after a successful call and
+whatever it prints is folded into the result. Both get the call as
+`$CHISEL_HOOK_TOOL`/`$CHISEL_HOOK_ARGS`/`$CHISEL_HOOK_PATH` env vars.
+
 ## Development
 
 ```sh
