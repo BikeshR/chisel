@@ -16,6 +16,15 @@ func (m Model) View() string {
 	}
 
 	var b strings.Builder
+	// Zero-width and invisible (verified: lipgloss.Width/ansi.StringWidth
+	// both report 0 for an embedded OSC-52 sequence) — riding along inside
+	// the normal rendered frame is what lets a completed selection's copy
+	// reach the terminal without a separate, racy write to os.Stdout. See
+	// clearClipboardOSCMsg for why this only needs to appear once.
+	b.WriteString(m.pendingClipboardOSC)
+	// Same mechanism, same reasoning, for the bell+OSC-9 idle
+	// notification — see notifyIdle/clearNotifyOSCMsg.
+	b.WriteString(m.pendingNotifyOSC)
 	b.WriteString(m.viewport.View())
 	b.WriteString("\n")
 
@@ -41,7 +50,17 @@ func (m Model) View() string {
 		ta.SetHeight(inputHeight - 1)
 		b.WriteString(ta.View())
 	default:
-		b.WriteString(m.textArea.View())
+		if m.reverseSearchActive {
+			// Padded with blank lines to the same inputHeight the normal
+			// textarea occupies, same reasoning as the busy-state spinner
+			// line above — otherwise the layout would shrink by
+			// (inputHeight-1) lines against what recomputeViewportHeight
+			// already reserved for it.
+			b.WriteString(m.reverseSearchLine())
+			b.WriteString(strings.Repeat("\n", inputHeight-1))
+		} else {
+			b.WriteString(m.textArea.View())
+		}
 	}
 	b.WriteString("\n")
 
@@ -68,6 +87,21 @@ func (m Model) busyLine() string {
 	return fmt.Sprintf("%s %s… (%s · esc to interrupt)", m.spinner.View(), label, elapsed)
 }
 
+// reverseSearchLine renders the ctrl+r incremental-search prompt shown
+// in place of the textarea while active — mirrors a shell's own
+// reverse-i-search display, including "failed" once a non-empty query
+// stops matching anything.
+func (m Model) reverseSearchLine() string {
+	label := "reverse-i-search"
+	matched := ""
+	if m.reverseSearchMatchIdx >= 0 && m.reverseSearchMatchIdx < len(m.inputHistory) {
+		matched = m.inputHistory[m.reverseSearchMatchIdx]
+	} else if m.reverseSearchQuery != "" {
+		label = "failed reverse-i-search"
+	}
+	return dimStyle.Render(fmt.Sprintf("(%s)`%s': ", label, m.reverseSearchQuery)) + matched
+}
+
 func (m Model) statusLine(width int) string {
 	context := formatTokenCount(m.lastContextTokens) + " tok"
 	if m.lastContextTokens >= contextWarnThreshold {
@@ -77,6 +111,15 @@ func (m Model) statusLine(width int) string {
 	plan := ""
 	if m.client.PlanMode() {
 		plan = planModeStyle.Render("PLAN MODE") + " · "
+	}
+
+	gitSegment := ""
+	if m.gitIsRepo && m.gitBranch != "" {
+		marker := ""
+		if m.gitDirty {
+			marker = "*"
+		}
+		gitSegment = dimStyle.Render(m.gitBranch+marker) + " · "
 	}
 
 	mcpWarning := ""
@@ -97,10 +140,11 @@ func (m Model) statusLine(width int) string {
 	tail := fmt.Sprintf("%s · context %s · spent %s in / %s out · ctrl+c to quit",
 		m.client.ModelName(), context, formatTokenCount(m.tokensIn), formatTokenCount(m.tokensOut))
 
-	// Drop segments least important to see at a glance first: background,
-	// then queued, then the mcp warning (still visible via /status even
-	// when dropped here). Plan mode and the core stats are never dropped.
-	optional := []string{background, queued, mcpWarning}
+	// Drop segments least important to see at a glance first: the git
+	// branch/dirty segment (still visible via /status even when dropped
+	// here), then background, then queued, then the mcp warning. Plan
+	// mode and the core stats are never dropped.
+	optional := []string{gitSegment, background, queued, mcpWarning}
 	for drop := 0; drop <= len(optional); drop++ {
 		line := " " + plan
 		for i, seg := range optional {

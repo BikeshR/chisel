@@ -54,30 +54,86 @@ func TestHandleModelCheckResult(t *testing.T) {
 	})
 }
 
+// TestHandleModelCheckResultDeliversQueuedMessage is the regression test
+// for the same class of bug as compact_test.go's version: a message
+// typed while a /model check was running used to be queued and then
+// left stranded, since handleModelCheckResult never called
+// dequeueOrSubmit on returning to stateInput.
+func TestHandleModelCheckResultDeliversQueuedMessage(t *testing.T) {
+	m := Model{
+		client:         agent.New("minimax-m3"),
+		state:          stateWaitingModel,
+		queuedMessages: []string{"go ahead"},
+	}
+	got, cmd := m.handleModelCheckResult(modelCheckResultMsg{model: "minimax-m3", reply: "ok"})
+	gotModel := got.(Model)
+
+	if len(gotModel.queuedMessages) != 0 {
+		t.Errorf("queuedMessages = %+v, want the queued message delivered", gotModel.queuedMessages)
+	}
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd to deliver the queued message")
+	}
+	if len(gotModel.messages) != 1 || gotModel.messages[0].Content != "go ahead" {
+		t.Errorf("messages = %+v, want the queued message sent as the next turn", gotModel.messages)
+	}
+}
+
 func TestHandleNewCommand(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	workDir := "/home/brana/code/testproj"
+	oldID := session.NewID()
 
-	if err := session.Save(workDir, []agent.Message{{Role: "user", Content: "old conversation"}}); err != nil {
+	if err := session.Save(workDir, oldID, []agent.Message{{Role: "user", Content: "old conversation"}}); err != nil {
 		t.Fatal(err)
 	}
 
 	m := Model{
-		workDir:  workDir,
-		messages: []agent.Message{{Role: "user", Content: "old conversation"}},
-		entries:  []entry{{styled: "you  old conversation"}},
+		workDir:             workDir,
+		sessionID:           oldID,
+		messages:            []agent.Message{{Role: "user", Content: "old conversation"}},
+		entries:             []entry{{styled: "you  old conversation"}},
+		lastToolResultIdx:   3,
+		lastToolCallKey:     "bash\x00{\"command\":\"ls\"}",
+		toolCallRepeatCount: 2,
 	}
-	got := m.handleNewCommand()
+	got, cmd := m.handleNewCommand()
 
 	if len(got.messages) != 0 {
 		t.Errorf("messages = %+v, want empty", got.messages)
+	}
+	if got.sessionID == oldID {
+		t.Error("expected /new to mint a fresh session id, not reuse the old one")
+	}
+	if got.lastToolResultIdx != -1 || got.lastToolCallKey != "" || got.toolCallRepeatCount != 0 {
+		t.Errorf("lastToolResultIdx=%d lastToolCallKey=%q toolCallRepeatCount=%d, want all reset by /new",
+			got.lastToolResultIdx, got.lastToolCallKey, got.toolCallRepeatCount)
 	}
 	lines := got.renderedLines()
 	if len(lines) != 1 || !strings.Contains(lines[0], "new session") {
 		t.Errorf("lines = %+v, want a single line announcing a new session", lines)
 	}
-	if _, _, ok := session.Load(workDir); ok {
-		t.Error("session.Load after /new: ok = true, want the saved session cleared")
+
+	// The old session must NOT be deleted — /new starts fresh, it
+	// doesn't destroy history; the previous conversation stays resumable.
+	if _, _, ok := session.LoadByID(workDir, oldID); !ok {
+		t.Error("expected the previous session to still be loadable after /new")
+	}
+
+	// /new must save immediately (even with zero messages) — otherwise
+	// quitting right after /new resumes the *old* session on next launch.
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd to persist the new (empty) session immediately")
+	}
+	if msg := cmd(); msg != nil {
+		t.Errorf("cmd() = %v, want nil (no save error)", msg)
+	}
+	_, _, resumedID, ok, corrupt := session.LoadLatest(workDir)
+	if !ok || corrupt {
+		t.Fatalf("LoadLatest after /new: ok=%v corrupt=%v, want ok=true corrupt=false", ok, corrupt)
+	}
+	if resumedID != got.sessionID {
+		t.Errorf("LoadLatest resumed id = %q, want the new session's id %q", resumedID, got.sessionID)
 	}
 }
 

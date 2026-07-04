@@ -3,8 +3,10 @@ package checkpoint
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestStore(t *testing.T) (*Store, string) {
@@ -238,10 +240,208 @@ func TestListEmptyBeforeAnyCheckpoint(t *testing.T) {
 	}
 }
 
+func TestPruneKeepsMostRecentAndFoldsOlderHistory(t *testing.T) {
+	s, workDir := newTestStore(t)
+
+	var hashes []string
+	for i := 0; i < 10; i++ {
+		writeFile(t, workDir, "a.txt", strconv.Itoa(i))
+		hash, err := s.Checkpoint("v" + strconv.Itoa(i))
+		if err != nil {
+			t.Fatalf("Checkpoint %d: %v", i, err)
+		}
+		hashes = append(hashes, hash)
+	}
+
+	if err := s.Prune(3); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	entries, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("got %d entries after pruning to 3, want 3: %+v", len(entries), entries)
+	}
+	// The 3 most recent commits keep their labels/content, but NOT their
+	// original hashes — a commit's hash is computed over its parent's
+	// hash too, so rewriting the ancestry chain unavoidably changes every
+	// descendant's hash, not just the ones actually folded away (see
+	// Prune's own doc comment). The old hashes are gone from this repo
+	// entirely now, so re-asserting them here isn't meaningful — what
+	// matters is that content/order survived.
+	wantLabels := []string{"v9", "v8", "v7"}
+	for i, e := range entries {
+		if e.Label != wantLabels[i] {
+			t.Errorf("entries[%d].Label = %q, want %q", i, e.Label, wantLabels[i])
+		}
+		if e.Hash == hashes[9-i] {
+			t.Errorf("entries[%d].Hash = %q, expected pruning to change it (ancestry was rewritten)", i, e.Hash)
+		}
+	}
+
+	// The most recent kept commit must still be restorable under its NEW
+	// (post-prune) hash — pruning must not corrupt the actual content.
+	if err := s.Restore(entries[0].Hash); err != nil {
+		t.Fatalf("Restore to most recent commit after prune: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(workDir, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "9" {
+		t.Errorf("a.txt = %q, want %q", got, "9")
+	}
+}
+
+func TestPruneNoOpWhenUnderLimit(t *testing.T) {
+	s, workDir := newTestStore(t)
+	writeFile(t, workDir, "a.txt", "v1")
+	hash, err := s.Checkpoint("only checkpoint")
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+
+	if err := s.Prune(500); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	entries, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Hash != hash {
+		t.Errorf("entries = %+v, want the single original checkpoint untouched", entries)
+	}
+}
+
+func TestOpenPrunesExistingLongHistory(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	s, err := Open(workDir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	for i := 0; i < maxCheckpointHistory+50; i++ {
+		writeFile(t, workDir, "a.txt", strconv.Itoa(i))
+		if _, err := s.Checkpoint("v" + strconv.Itoa(i)); err != nil {
+			t.Fatalf("Checkpoint %d: %v", i, err)
+		}
+	}
+
+	// Re-opening the same store (as chisel does on every startup) should
+	// prune it back down to the cap.
+	s2, err := Open(workDir)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	entries, err := s2.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != maxCheckpointHistory {
+		t.Errorf("got %d entries after re-opening, want exactly maxCheckpointHistory (%d)", len(entries), maxCheckpointHistory)
+	}
+}
+
 func TestCheckpointEmptyLabelFallsBack(t *testing.T) {
 	s, workDir := newTestStore(t)
 	writeFile(t, workDir, "a.txt", "content")
 	if _, err := s.Checkpoint(""); err != nil {
 		t.Fatalf("Checkpoint with empty label: %v", err)
+	}
+}
+
+// TestPruneStaleReposRemovesOldRepoNotFreshOne is the regression test
+// for a real disk-usage gap: sessions get age-based pruning and a
+// project's own checkpoint history is capped by commit count, but a
+// whole abandoned project's shadow repo — full file-tree snapshots, the
+// largest thing under ~/.chisel — used to persist forever.
+func TestPruneStaleReposRemovesOldRepoNotFreshOne(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	staleWorkDir := t.TempDir()
+	staleStore, err := Open(staleWorkDir)
+	if err != nil {
+		t.Fatalf("Open (stale): %v", err)
+	}
+	hash, err := staleStore.Checkpoint("only commit")
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	// Backdate the commit well past staleCheckpointRepoAge, recreating
+	// it at an old timestamp the same way Prune itself rewrites history.
+	tree, err := staleStore.treeOf(hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-staleCheckpointRepoAge - 24*time.Hour)
+	newHash, err := staleStore.commitTree(tree, "", "only commit", old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	branchRef, err := staleStore.git("symbolic-ref", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := staleStore.git("update-ref", strings.TrimSpace(branchRef), newHash); err != nil {
+		t.Fatal(err)
+	}
+
+	freshWorkDir := t.TempDir()
+	freshStore, err := Open(freshWorkDir)
+	if err != nil {
+		t.Fatalf("Open (fresh): %v", err)
+	}
+	if _, err := freshStore.Checkpoint("recent commit"); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+
+	removed, err := PruneStaleRepos()
+	if err != nil {
+		t.Fatalf("PruneStaleRepos: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1", removed)
+	}
+
+	if _, err := os.Stat(staleStore.gitDir); !os.IsNotExist(err) {
+		t.Error("expected the stale repo's directory to be removed")
+	}
+	if _, err := os.Stat(freshStore.gitDir); err != nil {
+		t.Errorf("expected the fresh repo's directory to survive: %v", err)
+	}
+}
+
+func TestPruneStaleReposNoCheckpointsRootIsNotAnError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	removed, err := PruneStaleRepos()
+	if err != nil {
+		t.Fatalf("PruneStaleRepos: %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("removed = %d, want 0", removed)
+	}
+}
+
+// TestPruneStaleReposLeavesRepoWithNoCommitsAlone confirms a repo whose
+// age can't be determined (never checkpointed) is left alone rather
+// than guessed at — lastCommitTime returning ok=false must not be
+// treated as "infinitely old."
+func TestPruneStaleReposLeavesRepoWithNoCommitsAlone(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	if _, err := Open(workDir); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	removed, err := PruneStaleRepos()
+	if err != nil {
+		t.Fatalf("PruneStaleRepos: %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("removed = %d, want 0 — a never-checkpointed repo shouldn't be pruned by guesswork", removed)
 	}
 }

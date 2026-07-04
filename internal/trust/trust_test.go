@@ -1,6 +1,11 @@
 package trust
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestContentHashIsStableAndDistinguishesContent(t *testing.T) {
 	a := ContentHash([]byte(`{"rules":{}}`))
@@ -71,6 +76,36 @@ func TestTrustDoesNotAffectOtherContent(t *testing.T) {
 	}
 	if trusted {
 		t.Error("trusting one hash should not trust a different one")
+	}
+}
+
+// TestTrustWritesAtomicallyNoLeftoverTempFile is the regression test
+// for a real robustness gap: Trust wrote its file via a plain
+// os.WriteFile, unlike internal/session's Save (temp file + rename) —
+// a crash mid-write could leave a truncated, corrupt trust file behind,
+// and two chisel processes trusting content at the same time could
+// race on a partial write. Mirrors session's own atomic-write test.
+func TestTrustWritesAtomicallyNoLeftoverTempFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := Open("trusted_test.json")
+
+	if err := s.Trust(ContentHash([]byte("some content"))); err != nil {
+		t.Fatalf("Trust: %v", err)
+	}
+
+	dir := filepath.Join(home, ".chisel")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("leftover temp file after Trust: %s", e.Name())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "trusted_test.json")); err != nil {
+		t.Errorf("expected the real trust file to exist: %v", err)
 	}
 }
 

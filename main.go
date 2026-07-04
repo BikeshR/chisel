@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -33,12 +34,32 @@ import (
 // direct testing — see docs/design.md.
 const defaultModel = "minimax-m3"
 
+// version identifies this build — override at release-build time via
+// -ldflags "-X main.version=v1.2.3"; a plain `go build`/`go install` (the
+// common case for this personal tool, with no release pipeline) leaves
+// it at "dev", which still beats having no way at all to tell which
+// build is actually running.
+var version = "dev"
+
 func main() {
 	loadDotEnv()
 
-	prompt := flag.String("p", "", "run non-interactively: send this prompt, print the final answer, and exit — read-only tools only (no bash, no edits, no MCP), since there's no terminal here to show a permission prompt to. Put -p last (or use -p=\"...\"): being a string flag, it otherwise swallows the next flag as its own value")
+	prompt := flag.String("p", "", "run non-interactively: send this prompt, print the final answer, and exit — read-only tools only (no bash, no edits, no MCP), since there's no terminal here to show a permission prompt to. Piped stdin (e.g. 'git diff | chisel -p \"review this\"') is appended to the prompt. Put -p last (or use -p=\"...\"): being a string flag, it otherwise swallows the next flag as its own value")
 	jsonOutput := flag.Bool("json", false, "with -p, emit a single JSON object (answer, usage, error) to stdout instead of plain text — for scripts and CI")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("chisel", version)
+		return
+	}
+
+	// -json only changes headless (-p) output — silently doing nothing
+	// with it otherwise (the previous behavior) left no indication the
+	// flag was even noticed, let alone why it had no effect.
+	if *jsonOutput && *prompt == "" {
+		fmt.Fprintln(os.Stderr, "chisel: -json has no effect without -p — ignoring")
+	}
 
 	// Checked here, not left to surface as the first request's raw 401 —
 	// that failure mode gives no indication of what's actually wrong,
@@ -60,7 +81,12 @@ func main() {
 	}
 
 	if *prompt != "" {
-		runHeadless(workDir, model, *prompt, *jsonOutput)
+		piped, err := readPipedStdin()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "chisel: reading piped stdin:", err)
+			os.Exit(1)
+		}
+		runHeadless(workDir, model, *prompt+piped, *jsonOutput)
 		return
 	}
 
@@ -68,7 +94,21 @@ func main() {
 	bash := agent.NewBashSession(workDir)
 	defer bash.Close()
 
-	mcpRegistry, mcpErrs := mcp.LoadAndStartAll()
+	userMCPCfg, _, err := mcp.LoadConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: mcp config:", err)
+	}
+	projectMCPCfg, projectMCPFound, err := mcp.LoadProjectConfig(workDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: project mcp config:", err)
+	}
+	if projectMCPFound && len(projectMCPCfg.MCPServers) > 0 {
+		if !confirmMCPTrust(workDir, userMCPCfg) {
+			fmt.Fprintln(os.Stderr, "chisel: project mcp.json not trusted — running this session without it")
+			projectMCPCfg = mcp.Config{}
+		}
+	}
+	mcpRegistry, mcpErrs := mcp.LoadAndStartAll(mcp.Merge(userMCPCfg, projectMCPCfg))
 	defer mcpRegistry.Close()
 	for _, e := range mcpErrs {
 		fmt.Fprintln(os.Stderr, "chisel: mcp:", e)
@@ -103,15 +143,39 @@ func main() {
 		client.SetMemory(memContent)
 	}
 
-	resumed, savedAt, _ := session.Load(workDir)
+	resumed, savedAt, sessionID, _, sessionLoadFailed := session.LoadLatest(workDir)
+	if sessionID == "" {
+		sessionID = session.NewID()
+	} else if err := session.Save(workDir, sessionID, resumed); err != nil {
+		// Re-save immediately, bumping SavedAt out of PruneOld's stale
+		// window right below — otherwise resuming a session older than
+		// staleSessionAge (returning to a long-dormant project after a
+		// while) gets it deleted by that very next call, and quitting
+		// before the first turn completes loses the conversation for
+		// good even though it was just shown as resumed. The same
+		// save-immediately reasoning /new and /resume already apply.
+		fmt.Fprintln(os.Stderr, "chisel: saving resumed session:", err)
+	}
+	// Runs after loading (and re-saving) this directory's own session,
+	// not before — so there's no risk of pruning it out from under the
+	// very resume that just happened (see PruneOld's own doc comment).
+	if _, err := session.PruneOld(); err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: pruning old sessions:", err)
+	}
 	customCommands := customcmd.Load(workDir)
+	// Runs before Open, not after — see PruneStaleRepos' own doc comment
+	// on why the current project's Store has to be the one doing any
+	// necessary recreating, not a prune racing in after it.
+	if _, err := checkpoint.PruneStaleRepos(); err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: pruning old checkpoint repos:", err)
+	}
 	checkpointStore, err := checkpoint.Open(workDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "chisel: checkpoints unavailable:", err)
 	}
 	skills := skill.Load(workDir)
 	client.SetSkills(skills)
-	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, memUser, memProject, customCommands, checkpointStore, skills, permRules, resumed, savedAt)
+	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, memUser, memProject, customCommands, checkpointStore, skills, permRules, resumed, savedAt, sessionLoadFailed, sessionID)
 
 	finalModel, err := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	// A still-running bash_background command has its own context,
@@ -172,6 +236,40 @@ func formatHeadlessJSON(answer string, usage agent.Usage, runErr error) (string,
 // that happens on failure too, not just success. Just a thin
 // process-exiting wrapper around runHeadlessCore, so a test can call
 // that directly instead.
+// readPipedStdin returns piped stdin content for headless mode (chisel
+// -p), framed so the model can tell where injected content starts and
+// ends — the same style @file references use in the interactive TUI
+// (see internal/tui/fileref.go's expandFileReferences). Common scripting
+// pattern this enables: `git diff | chisel -p "review this"`. Returns ""
+// without reading anything if stdin is a real terminal rather than a
+// pipe/redirect — checking Stdin.Stat's mode is what avoids blocking
+// forever waiting for input that will never come when chisel -p is run
+// interactively with nothing piped in.
+func readPipedStdin() (string, error) {
+	return readPipedInput(os.Stdin)
+}
+
+// readPipedInput is readPipedStdin with its source injectable, so a test
+// can supply a real os.Pipe() instead of the process's actual stdin.
+func readPipedInput(r *os.File) (string, error) {
+	info, err := r.Stat()
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeCharDevice != 0 {
+		return "", nil
+	}
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return "", err
+	}
+	if len(data) == 0 {
+		return "", nil
+	}
+	return fmt.Sprintf("\n\n--- piped stdin ---\n%s\n--- end piped stdin ---\n", data), nil
+}
+
 func runHeadless(workDir, model, prompt string, jsonOutput bool) {
 	answer, usage, err := runHeadlessCore(workDir, model, prompt)
 
@@ -358,6 +456,82 @@ func confirmPermRulesTrustFrom(workDir string, in io.Reader) bool {
 
 	if err := permrules.Trust(hash); err != nil {
 		fmt.Fprintln(os.Stderr, "chisel: saving permission rules trust decision:", err)
+	}
+	return true
+}
+
+// confirmMCPTrust is confirmHooksTrust's counterpart for a project-scoped
+// .chisel/mcp.json — a project-configured MCP server is exactly as
+// capable of running arbitrary commands as a hook is (it's launched the
+// same way: an arbitrary command plus args), so it needs the same
+// one-time, content-hash-keyed approval before chisel starts it. Only
+// the project-scoped config is gated — ~/.chisel/mcp.json is the user's
+// own, not something a cloned repo could plant.
+//
+// userCfg (already loaded by the caller) is used only to flag a project
+// entry that shadows a user-scoped server of the same name — a cloned
+// repo could otherwise plant, say, its own "github" server under a
+// name you already trust from your own config, and a generic "this
+// configures MCP servers" prompt gave no way to notice the swap.
+func confirmMCPTrust(workDir string, userCfg mcp.Config) bool {
+	return confirmMCPTrustFrom(workDir, userCfg, os.Stdin)
+}
+
+func confirmMCPTrustFrom(workDir string, userCfg mcp.Config, in io.Reader) bool {
+	path := mcp.ProjectConfigPath(workDir)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	hash := mcp.ContentHash(data)
+
+	trusted, err := mcp.IsTrusted(hash)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: checking mcp config trust:", err)
+		return false
+	}
+	if trusted {
+		return true
+	}
+
+	// Same reasoning chisel's own permission prompt was fixed for: a
+	// trust decision with no visibility into what it actually approves
+	// isn't an informed one. Best-effort — if the config doesn't even
+	// parse, fall back to the generic message; LoadAndStartAll reports
+	// the real parse error later regardless.
+	var cfg mcp.Config
+	if err := json.Unmarshal(data, &cfg); err != nil || len(cfg.MCPServers) == 0 {
+		fmt.Printf("chisel: %s configures MCP servers — each one launches an arbitrary command chisel will run and hand tools from to the model.\n", path)
+	} else {
+		fmt.Printf("chisel: %s configures these MCP servers:\n", path)
+		names := make([]string, 0, len(cfg.MCPServers))
+		for name := range cfg.MCPServers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			sc := cfg.MCPServers[name]
+			cmdLine := sc.Command
+			if len(sc.Args) > 0 {
+				cmdLine += " " + strings.Join(sc.Args, " ")
+			}
+			marker := ""
+			if _, overridden := userCfg.MCPServers[name]; overridden {
+				marker = "  (overrides your own user-scoped server of the same name!)"
+			}
+			fmt.Printf("  %s: %s%s\n", name, cmdLine, marker)
+		}
+	}
+	fmt.Print("Trust and start them for this project? [y/N] ")
+
+	reader := bufio.NewReader(in)
+	line, _ := reader.ReadString('\n')
+	if answer := strings.ToLower(strings.TrimSpace(line)); answer != "y" && answer != "yes" {
+		return false
+	}
+
+	if err := mcp.Trust(hash); err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: saving mcp config trust decision:", err)
 	}
 	return true
 }

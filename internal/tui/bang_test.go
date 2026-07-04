@@ -75,7 +75,35 @@ func TestBangFullFlowRunsThroughPersistentBashSession(t *testing.T) {
 	if !found {
 		t.Errorf("lines = %+v, want the command's output rendered", lines)
 	}
-	_ = followUp // dequeueOrSubmit's Cmd — nil here since nothing was queued
+
+	// A bang command can change git state just as easily as a tool call
+	// can — handleBangResult must refresh the cached status-bar segment
+	// too, not just once the model's own turn ends. tea.Batch collapses
+	// to the single Cmd directly (not a BatchMsg) when it's the only
+	// non-nil one, which is exactly this case (nothing queued, nothing
+	// buffered) — so check for either shape.
+	if followUp == nil {
+		t.Fatal("expected a non-nil Cmd (refreshGitStatus, even with nothing queued)")
+	}
+	switch msg := followUp().(type) {
+	case gitStatusMsg:
+		// The lone survivor after tea.Batch's nil-filtering — expected.
+	case tea.BatchMsg:
+		found := false
+		for _, sub := range msg {
+			if sub == nil {
+				continue
+			}
+			if _, ok := sub().(gitStatusMsg); ok {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("expected refreshGitStatus's Cmd among handleBangResult's batch")
+		}
+	default:
+		t.Errorf("followUp() = %T, want gitStatusMsg or a tea.BatchMsg containing one", msg)
+	}
 }
 
 // TestBangSharesStateWithPersistentBashSession is the reason bang mode

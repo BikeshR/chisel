@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -38,6 +40,44 @@ func TestHandleStreamCompleteTriggersAutoCompact(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("lines = %+v, want a notice that auto-compaction is starting", gotModel.renderedLines())
+	}
+}
+
+// TestHandleStreamCompleteSuppressesIdleNotificationWhenAutoCompacting
+// is the regression test for a real UX bug: the "chisel is done" bell/
+// OSC-9 notification fired even when auto-compact was about to
+// immediately start a new turn — the same "user's already mid-flow,
+// don't notify" reasoning already applied to a queued message just
+// wasn't applied to this other "chisel is about to be busy again
+// immediately" case.
+func TestHandleStreamCompleteSuppressesIdleNotificationWhenAutoCompacting(t *testing.T) {
+	// A real server so invoking every batched sub-Cmd (including
+	// compact's own, which makes a real client.SendStreaming call) is
+	// safe and fast rather than hitting an unreachable default URL.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"summary\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	m := Model{client: agent.New("minimax-m3")}
+	_, cmd := m.handleStreamComplete(
+		agent.Message{Role: "assistant", Content: "done"},
+		agent.Usage{InputTokens: contextWarnThreshold + 1},
+		"stop",
+	)
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd")
+	}
+	for _, sub := range unpackBatch(t, cmd) {
+		if sub == nil {
+			continue
+		}
+		if _, ok := sub().(notifyIdleMsg); ok {
+			t.Error("expected no notifyIdleMsg when auto-compact is about to start immediately")
+		}
 	}
 }
 

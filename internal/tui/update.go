@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -12,6 +14,8 @@ import (
 
 	"github.com/BikeshR/chisel/internal/agent"
 	"github.com/BikeshR/chisel/internal/gitutil"
+	"github.com/BikeshR/chisel/internal/history"
+	"github.com/BikeshR/chisel/internal/permrules"
 )
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -30,9 +34,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
-		var cmd tea.Cmd
-		m.viewport, cmd = m.viewport.Update(msg)
-		return m, cmd
+		return m.handleMouseMsg(msg)
+
+	case clearClipboardOSCMsg:
+		m.pendingClipboardOSC = ""
+		return m, nil
+
+	case notifyIdleMsg:
+		m.pendingNotifyOSC = "\a" + osc9Notify(msg.message)
+		return m, clearNotifyOSCCmd()
+
+	case clearNotifyOSCMsg:
+		m.pendingNotifyOSC = ""
+		return m, nil
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -41,7 +55,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleStreamEvent(msg)
 
 	case toolResultMsg:
-		return m.handleToolResult(msg.result)
+		return m.handleToolResult(msg.result, msg.interrupted)
 
 	case modelCheckResultMsg:
 		return m.handleModelCheckResult(msg)
@@ -51,6 +65,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionSaveErrorMsg:
 		m.appendLine(errorStyle.Render("session save failed: " + msg.err.Error()))
+		return m, nil
+
+	case historySaveErrorMsg:
+		m.appendLine(dimStyle.Render("note: couldn't save prompt history: " + msg.err.Error()))
+		return m, nil
+
+	case gitStatusMsg:
+		m.gitIsRepo = msg.isRepo
+		m.gitBranch = msg.branch
+		m.gitDirty = msg.dirty
 		return m, nil
 
 	case autoCommitResultMsg:
@@ -150,6 +174,48 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.startBusy(stateExecutingTool)
 			m.appendLine(dimStyle.Render("  → approved (always allow for this session)"))
 			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, m.skills, call)
+		case "p", "P":
+			// Same doom-loop guard as "a" — a forced confirmation never
+			// offers this option (see dispatchNextTool), but the key
+			// itself isn't otherwise disabled, so a habitual press still
+			// just falls through to a plain approval instead of writing a
+			// permanent rule for a call actively suspected of looping.
+			call := m.pendingUses[0]
+			toolName, pattern, ok := persistableRuleFor(call)
+			switch {
+			case ok && !m.awaitingLoopConfirmation:
+				// Re-read from disk rather than building on m.permRules —
+				// that in-memory copy can be nil (trust was declined at
+				// startup, or the file simply parse-errored then) or stale
+				// (edited on disk mid-session), and Add+Save on top of
+				// either would silently overwrite whatever's actually on
+				// disk with just this one new rule, destroying an
+				// existing repo-provided policy in the process.
+				onDisk, _, loadErr := permrules.Load(m.workDir)
+				if loadErr != nil {
+					m.appendLine(errorStyle.Render("  couldn't save permission rule: " + loadErr.Error()))
+					break
+				}
+				updated := permrules.Add(onDisk, toolName, pattern, permrules.Allow)
+				if err := permrules.Save(m.workDir, updated); err != nil {
+					m.appendLine(errorStyle.Render("  couldn't save permission rule: " + err.Error()))
+				} else {
+					m.permRules = updated
+					// Auto-trust the file this session just wrote — the
+					// keypress that created this rule *is* the human
+					// approval the trust gate exists to require, so a
+					// future run loading this same content shouldn't have
+					// to ask again for something the user just did themselves.
+					if data, readErr := os.ReadFile(permrules.ConfigPath(m.workDir)); readErr == nil {
+						_ = permrules.Trust(permrules.ContentHash(data))
+					}
+					m.appendLine(dimStyle.Render("  → approved (saved as a permanent rule in .chisel/permissions.json)"))
+				}
+			default:
+				m.appendLine(dimStyle.Render("  → approved"))
+			}
+			m.startBusy(stateExecutingTool)
+			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, m.skills, call)
 		case "n", "N":
 			// Denying isn't a dead end: rather than immediately resending
 			// a canned "denied" message and letting the model guess why,
@@ -168,11 +234,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				ID:      m.pendingUses[0].ID,
 				Content: "The user denied permission for this action.",
 				IsError: true,
-			})
+			}, false)
 		}
 		return m, nil
 
 	case stateInput:
+		if m.reverseSearchActive {
+			return m.handleReverseSearchKey(msg)
+		}
+		if msg.Type == tea.KeyCtrlR {
+			m.startReverseSearch()
+			return m, nil
+		}
 		// Plain enter submits; alt+enter (textArea's rebound
 		// InsertNewline — see New) falls through instead, so it never
 		// reaches this branch at all.
@@ -221,12 +294,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.KeyEnter && !msg.Alt {
 			text := strings.TrimSuffix(m.textArea.Value(), "\n")
 			m.textArea.Reset()
+			var historyCmd tea.Cmd
 			if text != "" {
 				m.queuedMessages = append(m.queuedMessages, text)
-				m.recordHistory(text)
+				historyCmd = m.recordHistory(text)
 				m.appendLine(dimStyle.Render("  → queued: " + firstLine(text)))
 			}
-			return m, nil
+			return m, historyCmd
 		}
 		var cmd tea.Cmd
 		m.textArea, cmd = m.textArea.Update(msg)
@@ -270,17 +344,28 @@ func (m *Model) handleScrollKey(msg tea.KeyMsg) bool {
 }
 
 // recordHistory appends text to the recall history for up/down (see
-// navigateHistory), skipping an exact repeat of the last entry so
-// repeatedly recalling and resubmitting the same line doesn't pile up
-// duplicates — same behavior as a shell's history. Also resets
-// navigation state: whatever was being recalled is now submitted, so
-// there's nothing left to return to via "down".
-func (m *Model) recordHistory(text string) {
-	if len(m.inputHistory) == 0 || m.inputHistory[len(m.inputHistory)-1] != text {
-		m.inputHistory = append(m.inputHistory, text)
-	}
+// navigateHistory) and ctrl+r reverse search, skipping an exact repeat
+// of the last entry so repeatedly recalling and resubmitting the same
+// line doesn't pile up duplicates — same behavior as a shell's history.
+// Also resets navigation state: whatever was being recalled is now
+// submitted, so there's nothing left to return to via "down". Returns a
+// Cmd that persists the entry to disk (internal/history) so recall
+// survives a restart, same as session resume already does for the
+// conversation itself — nil if this was a duplicate and there's nothing
+// new to persist.
+func (m *Model) recordHistory(text string) tea.Cmd {
 	m.historyIdx = -1
 	m.historyDraft = ""
+	if len(m.inputHistory) > 0 && m.inputHistory[len(m.inputHistory)-1] == text {
+		return nil
+	}
+	m.inputHistory = append(m.inputHistory, text)
+	return func() tea.Msg {
+		if err := history.Append(text); err != nil {
+			return historySaveErrorMsg{err: err}
+		}
+		return nil
+	}
 }
 
 // navigateHistory moves through inputHistory on up/down, stashing the
@@ -317,6 +402,78 @@ func (m *Model) navigateHistory(up bool) {
 	m.textArea.CursorEnd()
 }
 
+// startReverseSearch enters ctrl+r's incremental reverse-search mode —
+// a no-op if there's no history to search at all.
+func (m *Model) startReverseSearch() {
+	if len(m.inputHistory) == 0 {
+		return
+	}
+	m.reverseSearchActive = true
+	m.reverseSearchQuery = ""
+	m.reverseSearchMatchIdx = -1
+}
+
+// handleReverseSearchKey drives ctrl+r's incremental search once
+// active — mirrors a shell's own reverse-i-search: typing narrows the
+// query (searching from the most recent entry backward each time),
+// ctrl+r again steps to the next older match for the same query, enter
+// accepts the current match and submits it immediately (matching a
+// shell's own enter-during-search behavior), esc cancels back to
+// whatever was being composed before search started.
+func (m Model) handleReverseSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case msg.Type == tea.KeyEsc:
+		m.reverseSearchActive = false
+		m.reverseSearchQuery = ""
+		return m, nil
+
+	case msg.Type == tea.KeyCtrlR:
+		m.findReverseSearchMatch(m.reverseSearchMatchIdx - 1)
+		return m, nil
+
+	case msg.Type == tea.KeyEnter && !msg.Alt:
+		m.reverseSearchActive = false
+		found := m.reverseSearchMatchIdx >= 0 && m.reverseSearchMatchIdx < len(m.inputHistory)
+		m.reverseSearchQuery = ""
+		if !found {
+			return m, nil
+		}
+		m.textArea.SetValue(m.inputHistory[m.reverseSearchMatchIdx])
+		return m.submit()
+
+	case msg.Type == tea.KeyBackspace:
+		if len(m.reverseSearchQuery) > 0 {
+			_, size := utf8.DecodeLastRuneInString(m.reverseSearchQuery)
+			m.reverseSearchQuery = m.reverseSearchQuery[:len(m.reverseSearchQuery)-size]
+		}
+		m.findReverseSearchMatch(len(m.inputHistory) - 1)
+		return m, nil
+
+	case len(msg.Runes) > 0:
+		m.reverseSearchQuery += string(msg.Runes)
+		m.findReverseSearchMatch(len(m.inputHistory) - 1)
+		return m, nil
+	}
+	return m, nil
+}
+
+// findReverseSearchMatch searches m.inputHistory from startIdx backward
+// (toward index 0, the oldest entry) for one containing the current
+// query, setting reverseSearchMatchIdx to what it finds, or -1 if
+// nothing in range matches (or the query is empty).
+func (m *Model) findReverseSearchMatch(startIdx int) {
+	m.reverseSearchMatchIdx = -1
+	if m.reverseSearchQuery == "" {
+		return
+	}
+	for i := startIdx; i >= 0; i-- {
+		if strings.Contains(m.inputHistory[i], m.reverseSearchQuery) {
+			m.reverseSearchMatchIdx = i
+			return
+		}
+	}
+}
+
 func (m Model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSuffix(m.textArea.Value(), "\n")
 	m.textArea.Reset()
@@ -334,29 +491,51 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		if text != "" {
 			reason += " " + text
 		}
-		return m.handleToolResult(agent.ToolResult{ID: m.pendingUses[0].ID, Content: reason, IsError: true})
+		return m.handleToolResult(agent.ToolResult{ID: m.pendingUses[0].ID, Content: reason, IsError: true}, false)
 	}
 
 	if text == "" {
 		return m, nil
 	}
 
-	m.recordHistory(text)
+	historyCmd := m.recordHistory(text)
+	m, cmd := m.dispatchText(text)
+	return m, tea.Batch(cmd, historyCmd, textarea.Blink)
+}
 
+// dispatchText routes text exactly the way a live submission would — a
+// "/" command through handleCommand, a "!" command through runBang,
+// anything else through submitText as a plain message. The shared core
+// between submit() (which also records history and restarts the cursor
+// blink, neither relevant to a message that's already queued) and
+// dequeueOrSubmit: a message queued while chisel was busy must be routed
+// the same way it would have been if typed and submitted right then —
+// dequeueOrSubmit used to send it straight through submitText
+// regardless, so a queued "/status" or "!git stash" was delivered to the
+// model as a literal user message instead of ever running.
+//
+// Also where a pending /rewind confirmation actually gets cancelled by
+// "anything else," matching what the prompt itself promises ("type
+// /rewind confirm to proceed, or anything else to cancel") — a plain
+// message already cleared it (submitText, unconditionally, at the start
+// of every new turn), but /status, /git, /usage, a bang command, or any
+// other command didn't, so a stray /rewind confirm minutes later could
+// still destructively fire against whatever's pending from an
+// unrelated interaction in between. Anything starting with "/rewind"
+// itself is exempt — re-listing, re-targeting, or confirming are all
+// part of the same rewind flow, not something else interrupting it.
+func (m Model) dispatchText(text string) (Model, tea.Cmd) {
+	if m.pendingRewind != nil && !strings.HasPrefix(strings.TrimSpace(text), "/rewind") {
+		m.pendingRewind = nil
+		m.appendLine(dimStyle.Render("  (rewind confirmation cancelled)"))
+	}
 	if strings.HasPrefix(text, "/") {
-		var cmd tea.Cmd
-		m, cmd = m.handleCommand(text)
-		return m, tea.Batch(cmd, textarea.Blink)
+		return m.handleCommand(text)
 	}
-
 	if strings.HasPrefix(text, "!") {
-		var cmd tea.Cmd
-		m, cmd = m.runBang(strings.TrimPrefix(text, "!"))
-		return m, tea.Batch(cmd, textarea.Blink)
+		return m.runBang(strings.TrimPrefix(text, "!"))
 	}
-
-	m, cmd := m.submitText(text)
-	return m, tea.Batch(cmd, textarea.Blink)
+	return m.submitText(text)
 }
 
 // submitText sends text as a new user message and starts the model's
@@ -382,14 +561,18 @@ func (m Model) submitText(text string) (Model, tea.Cmd) {
 	// transcript shows exactly what the user typed — otherwise a large
 	// injected file would turn the display into a wall of text every
 	// time one's referenced.
-	m.messages = append(m.messages, agent.Message{Role: "user", Content: expandFileReferences(m.workDir, text)})
+	expanded, truncatedRefs := expandFileReferences(m.workDir, text)
+	m.messages = append(m.messages, agent.Message{Role: "user", Content: expanded})
 	m.appendLine(userStyle.Render("you  ") + text)
+	if len(truncatedRefs) > 0 {
+		m.appendLine(dimStyle.Render(fmt.Sprintf("  (@%s truncated to fit — the file is very large)", strings.Join(truncatedRefs, ", @"))))
+	}
 	m.startBusy(stateWaitingModel)
 
 	ctx := m.newTurnContext()
 	return m, tea.Batch(
 		startStream(ctx, m.client, m.messages),
-		saveSession(m.workDir, m.messages),
+		saveSession(m.workDir, m.sessionID, m.messages),
 		checkpointCmd(m.checkpointStore, firstLine(text), messageIndex),
 	)
 }
@@ -399,16 +582,64 @@ func (m Model) submitText(text string) (Model, tea.Cmd) {
 // if any — call after any transition back to stateInput, batched
 // alongside whatever else that transition already needed to do (saving
 // the session, notifying), so a message typed while busy isn't silently
-// swallowed once the wait is finally over. Returns nil if nothing is queued.
+// swallowed once the wait is finally over. Routed through dispatchText,
+// not sent straight to submitText — a queued "/status" or "!git stash"
+// needs to run as a command/bang, not be delivered to the model as a
+// literal user message. Returns nil if nothing is queued.
 func (m *Model) dequeueOrSubmit() tea.Cmd {
 	if len(m.queuedMessages) == 0 {
 		return nil
 	}
 	next := m.queuedMessages[0]
 	m.queuedMessages = m.queuedMessages[1:]
-	updated, cmd := m.submitText(next)
+	updated, cmd := m.dispatchText(next)
 	*m = updated
 	return cmd
+}
+
+// mergeBufferedBackgroundResults folds any background-task completions
+// that arrived while a turn was still in flight into m.messages, now
+// that the turn is fully resolved — see handleBackgroundTaskDone, which
+// defers exactly this (but still shows the transcript line and notifies
+// immediately) to avoid a synthetic message landing between an
+// assistant's tool_calls and their own results, a shape the API rejects,
+// if the completion's timing happened to land there. Call at every
+// chokepoint that already means "the turn just settled" — in practice,
+// every call site of dequeueOrSubmit.
+func (m *Model) mergeBufferedBackgroundResults() {
+	if len(m.pendingBackgroundResults) == 0 {
+		return
+	}
+	m.messages = append(m.messages, m.pendingBackgroundResults...)
+	m.pendingBackgroundResults = nil
+}
+
+// flushPendingBackgroundResults is mergeBufferedBackgroundResults plus a
+// save Cmd, for callers that don't already have their own save in
+// flight to piggyback the merge onto — nil if nothing was buffered.
+func (m *Model) flushPendingBackgroundResults() tea.Cmd {
+	if len(m.pendingBackgroundResults) == 0 {
+		return nil
+	}
+	m.mergeBufferedBackgroundResults()
+	return saveSession(m.workDir, m.sessionID, m.messages)
+}
+
+// turnSettledCmd bundles flushPendingBackgroundResults with
+// dequeueOrSubmit for callers that just returned to stateInput and need
+// nothing else special done — handleModelCheckResult and
+// handleCompactResult both used to return to stateInput directly
+// without either, so a message typed during a /model check or a
+// /compact (including an *auto*-triggered one, reachable without the
+// user ever typing /compact themselves) got queued and then never
+// delivered, stranded until some unrelated later turn happened to
+// complete. Callers with extra logic around the queued-or-not outcome
+// (handleStreamComplete's "skip the notification if something was
+// queued", handleStreamEvent's cancellation branch) call both directly
+// instead, since they need to inspect dequeueOrSubmit's return value.
+func (m *Model) turnSettledCmd() tea.Cmd {
+	flush := m.flushPendingBackgroundResults()
+	return tea.Batch(flush, m.dequeueOrSubmit())
 }
 
 // handleStreamEvent processes one event from the in-flight response. While
@@ -429,18 +660,27 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 	if ev.Err != nil {
 		m.endTurn()
 		m.endStreamLine()
-		m.appendLine(errorStyle.Render("error  " + interruptibleErrorText(ev.Err)))
+		errText := interruptibleErrorText(ev.Err)
+		// No retry hint for an interruption — esc means the user chose
+		// to stop it, not that anything failed; the hint is for the
+		// genuine-error case, where a user unfamiliar with /retry would
+		// otherwise have no indication it exists.
+		if !errors.Is(ev.Err, context.Canceled) {
+			errText += " — try /retry"
+		}
+		m.appendLine(errorStyle.Render("error  " + errText))
 		m.state = stateInput
+		flush := m.flushPendingBackgroundResults()
 		if queued := m.dequeueOrSubmit(); queued != nil {
-			return m, queued
+			return m, tea.Batch(flush, queued)
 		}
 		// No notification for a cancellation — esc means the user is
 		// already at the keyboard, mid-keypress; a genuine error while
 		// they may have stepped away is the case worth surfacing.
 		if errors.Is(ev.Err, context.Canceled) {
-			return m, nil
+			return m, flush
 		}
-		return m, notifyIdle("chisel hit an error")
+		return m, tea.Batch(flush, notifyIdle("chisel hit an error"))
 	}
 
 	return m.handleStreamComplete(*ev.Message, ev.Usage, ev.FinishReason)
@@ -469,15 +709,20 @@ func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage, finis
 	if len(m.pendingUses) == 0 {
 		m.endTurn()
 		m.state = stateInput
-		save := saveSession(m.workDir, m.messages)
+		m.mergeBufferedBackgroundResults()
+		save := saveSession(m.workDir, m.sessionID, m.messages)
 
 		// A queued message delivered here means chisel is about to be
 		// busy again right away — skip the "chisel is done" notification
 		// in that case, the user's already at the keyboard (that's how
-		// the message got queued in the first place).
+		// the message got queued in the first place). Same reasoning
+		// applies to auto-compact triggering right below: it's its own
+		// turn starting immediately, not chisel actually going idle, so
+		// the notification would be just as misleading there.
 		queued := m.dequeueOrSubmit()
+		autoCompacting := queued == nil && m.lastContextTokens >= contextWarnThreshold
 		var notify tea.Cmd
-		if queued == nil {
+		if queued == nil && !autoCompacting {
 			notify = notifyIdle("chisel is done")
 		}
 
@@ -493,13 +738,15 @@ func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage, finis
 		// queued): compacting is itself a turn, and a queued message
 		// means the user's already mid-flow and shouldn't be interrupted
 		// by an extra step in between.
-		if queued == nil && m.lastContextTokens >= contextWarnThreshold {
+		gitStatus := refreshGitStatus(m.workDir)
+
+		if autoCompacting {
 			m.appendLine(dimStyle.Render("context is large — compacting automatically…"))
 			m.startBusy(stateWaitingModel)
-			return m, tea.Batch(save, notify, autoCommitCmd, compact(m.newTurnContext(), m.client, m.messages))
+			return m, tea.Batch(save, notify, autoCommitCmd, gitStatus, compact(m.newTurnContext(), m.client, m.messages))
 		}
 
-		return m, tea.Batch(save, notify, queued, autoCommitCmd)
+		return m, tea.Batch(save, notify, queued, autoCommitCmd, gitStatus)
 	}
 
 	// Deliberately not saving here: resp (just appended above) carries
@@ -521,7 +768,8 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	if len(m.pendingUses) == 0 {
 		m.endTurn()
 		m.state = stateInput
-		return m, m.dequeueOrSubmit()
+		flush := m.flushPendingBackgroundResults()
+		return m, tea.Batch(flush, m.dequeueOrSubmit())
 	}
 	call := m.pendingUses[0]
 
@@ -546,19 +794,22 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 
 	switch decision {
 	case permissionDeny:
-		return m.handleToolResult(agent.ToolResult{ID: call.ID, Content: reason, IsError: true})
+		return m.handleToolResult(agent.ToolResult{ID: call.ID, Content: reason, IsError: true}, false)
 
 	case permissionAsk:
 		m.endTurn() // nothing async is in flight while waiting on a y/n decision
 		m.state = stateAwaitingPermission
 		m.awaitingLoopConfirmation = looping
 
-		options := "[y/n]"
-		m.permissionHint = "y/n · esc to deny"
+		optionKeys := "y/n"
 		if _, allowlistable := allowlistKey(call); allowlistable && !looping {
-			options = "[y/n/a]"
-			m.permissionHint = "y/n/a · esc to deny"
+			optionKeys += "/a"
 		}
+		if _, _, persistable := persistableRuleFor(call); persistable && !looping {
+			optionKeys += "/P"
+		}
+		options := "[" + optionKeys + "]"
+		m.permissionHint = optionKeys + " · esc to deny"
 
 		prompt := fmt.Sprintf("allow %s?  %s", summarizeCall(call), options)
 		if diff, ok := agent.PreviewEdit(m.workDir, call); ok {
@@ -588,7 +839,7 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
+func (m Model) handleToolResult(result agent.ToolResult, interrupted bool) (tea.Model, tea.Cmd) {
 	if len(m.pendingUses) == 0 {
 		return m, nil
 	}
@@ -604,7 +855,11 @@ func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
 	}
 
 	if result.IsError {
-		m.appendToolResultEntry(interruptibleResultText(result.Content), true)
+		text := result.Content
+		if interrupted {
+			text = "interrupted"
+		}
+		m.appendToolResultEntry(interruptibleResultText(text), true)
 	} else {
 		m.appendToolResultEntry(result.Content, false)
 		// Extracted from the call's own arguments, not result.Content —
@@ -620,6 +875,19 @@ func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
 	m.pendingResults = append(m.pendingResults, result.ToMessage())
 	m.pendingUses = m.pendingUses[1:]
 
+	// esc cancelled this call's own context — but newTurnContext hands
+	// dispatchNextTool a *fresh*, uncancelled context for whatever comes
+	// next, so without this check a single esc only ever stopped the one
+	// call in flight: the rest of pendingUses dispatched normally, and
+	// once they all resolved chisel went right back to the model with
+	// them, which typically just retried. Stop the whole turn instead —
+	// resolve everything still queued with a synthetic result (the
+	// history needs one per tool_calls entry regardless) and return to
+	// stateInput rather than starting another model request.
+	if interrupted {
+		return m.abortTurnAfterInterruption()
+	}
+
 	if len(m.pendingUses) > 0 {
 		return m.dispatchNextTool()
 	}
@@ -628,7 +896,38 @@ func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
 	m.pendingResults = nil
 	m.startBusy(stateWaitingModel)
 	ctx := m.newTurnContext()
-	return m, tea.Batch(startStream(ctx, m.client, m.messages), saveSession(m.workDir, m.messages))
+	return m, tea.Batch(startStream(ctx, m.client, m.messages), saveSession(m.workDir, m.sessionID, m.messages))
+}
+
+// abortTurnAfterInterruption resolves every tool call still waiting in
+// pendingUses (never dispatched — chisel processes these strictly
+// sequentially) with a synthetic "interrupted" result, so the history
+// stays API-valid (every tool_calls entry needs a matching result)
+// without actually running any of them, then returns to stateInput
+// without starting another model request. Called only from
+// handleToolResult's interrupted branch, right after the call that was
+// actually in flight already got its own real (cancelled) result
+// appended to pendingResults.
+func (m Model) abortTurnAfterInterruption() (tea.Model, tea.Cmd) {
+	skipped := len(m.pendingUses)
+	for _, call := range m.pendingUses {
+		m.pendingResults = append(m.pendingResults, agent.ToolResult{
+			ID: call.ID, Content: "Interrupted by user; this call was never run.", IsError: true,
+		}.ToMessage())
+	}
+	m.pendingUses = nil
+	if skipped > 0 {
+		m.appendLine(dimStyle.Render(fmt.Sprintf("  (turn interrupted — %d more queued tool call(s) skipped)", skipped)))
+	}
+
+	m.messages = append(m.messages, m.pendingResults...)
+	m.pendingResults = nil
+	m.endTurn()
+	m.state = stateInput
+
+	flush := m.flushPendingBackgroundResults()
+	save := saveSession(m.workDir, m.sessionID, m.messages)
+	return m, tea.Batch(flush, save, m.dequeueOrSubmit())
 }
 
 // interruptibleResultText mirrors interruptibleErrorText for a tool

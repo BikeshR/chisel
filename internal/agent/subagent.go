@@ -109,8 +109,21 @@ func RunSubagent(ctx context.Context, workDir, model, task string) (string, Usag
 // RunSubagent (execTool restricted to a fixed, read-only tool set with
 // no permission gate) and headless mode (chisel -p, in main.go), which
 // supplies its own tool set and dispatch function instead.
+//
+// Every call is checked against client.tools — the exact schema sent in
+// the request — before reaching execTool. Both callers rely on "this
+// tool set can't mutate anything" being a guarantee enforced by
+// construction, not by the model's cooperation (see subagentTools'/
+// ReadOnlyTools' own doc comments); without this check, execTool itself
+// (agent.Execute, dispatching purely by call.Function.Name) would still
+// run a real edit or an unbounded dispatch_subagent recursion for any
+// hallucinated call whose name happens to match a tool that exists in
+// the package but was never offered — a str_replace_based_edit_tool
+// call is exactly the kind of thing every coding model has seen
+// thousands of times in training, offered or not.
 func RunLoop(ctx context.Context, client *Client, history []Message, maxTurns int, execTool func(ToolCall) ToolResult) (string, Usage, error) {
 	var total Usage
+	offered := toolNameSet(client.tools)
 
 	for turn := 1; turn <= maxTurns; turn++ {
 		ch, err := client.SendStreaming(ctx, history)
@@ -135,12 +148,32 @@ func RunLoop(ctx context.Context, client *Client, history []Message, maxTurns in
 		}
 
 		for _, call := range msg.ToolCalls {
-			result := execTool(call)
+			var result ToolResult
+			if !offered[call.Function.Name] {
+				result = ToolResult{
+					ID:      call.ID,
+					Content: fmt.Sprintf("%q was not offered in this request and cannot be called here", call.Function.Name),
+					IsError: true,
+				}
+			} else {
+				result = execTool(call)
+			}
 			history = append(history, result.ToMessage())
 		}
 	}
 
 	return "", total, fmt.Errorf("did not finish within %d turns", maxTurns)
+}
+
+// toolNameSet is the set of tool names actually offered in a request —
+// the whitelist RunLoop checks every call against before it ever
+// reaches execTool.
+func toolNameSet(tools []Tool) map[string]bool {
+	names := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		names[t.Function.Name] = true
+	}
+	return names
 }
 
 func subagentTaskPrompt(task string) string {

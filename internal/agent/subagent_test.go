@@ -203,6 +203,7 @@ func TestRunLoopUsesCustomExecTool(t *testing.T) {
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
 	client := New("minimax-m3")
+	client.SetTools([]Tool{{Type: "function", Function: ToolFunction{Name: "custom"}}})
 	var dispatched []string
 	execTool := func(call ToolCall) ToolResult {
 		dispatched = append(dispatched, call.Function.Name)
@@ -224,6 +225,73 @@ func TestRunLoopUsesCustomExecTool(t *testing.T) {
 	}
 	if usage.InputTokens != 200 || usage.OutputTokens != 40 {
 		t.Errorf("usage = %+v, want 200/40 accumulated across both turns", usage)
+	}
+}
+
+// TestRunSubagentRejectsHallucinatedMutatingToolCall is the regression
+// test for a real security gap: RunSubagent's execTool called
+// agent.Execute directly, which dispatches purely by call.Function.Name
+// regardless of what tools were actually offered in the request —
+// subagentTools() never declares str_replace_based_edit_tool, but
+// nothing stopped a model from emitting that name anyway (every coding
+// model has seen it thousands of times in training) and having it
+// actually execute, contradicting subagentTools' own documented
+// guarantee of being "incapable of mutating anything by construction."
+func TestRunSubagentRejectsHallucinatedMutatingToolCall(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hallucinated := `[{"index":0,"id":"call_1","type":"function","function":{"name":"str_replace_based_edit_tool","arguments":"{\"command\":\"str_replace\",\"path\":\"notes.txt\",\"old_str\":\"original\",\"new_str\":\"hacked\"}"}}]`
+	server, _ := scriptedServer(t, []string{
+		sseChunk("", "tool_calls", hallucinated),
+		sseChunk("done", "stop", ""),
+	})
+	defer server.Close()
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	_, _, err := RunSubagent(context.Background(), dir, "minimax-m3", "do something")
+	if err != nil {
+		t.Fatalf("RunSubagent: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "original" {
+		t.Errorf("notes.txt = %q, want it untouched — a tool never offered to the subagent must not execute", data)
+	}
+}
+
+// TestRunLoopRejectsToolNotInOfferedSet is the direct unit-level version
+// of the same fix — a call for a name not present in client.tools must
+// never reach execTool at all.
+func TestRunLoopRejectsToolNotInOfferedSet(t *testing.T) {
+	toolCall := `[{"index":0,"id":"call_1","type":"function","function":{"name":"not_offered","arguments":"{}"}}]`
+	server, _ := scriptedServer(t, []string{
+		sseChunk("", "tool_calls", toolCall),
+		sseChunk("done", "stop", ""),
+	})
+	defer server.Close()
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	client := New("minimax-m3")
+	client.SetTools([]Tool{{Type: "function", Function: ToolFunction{Name: "allowed"}}})
+	called := false
+	execTool := func(call ToolCall) ToolResult {
+		called = true
+		return ToolResult{ID: call.ID, Content: "should never run"}
+	}
+
+	if _, _, err := RunLoop(context.Background(), client, []Message{{Role: "user", Content: "go"}}, 5, execTool); err != nil {
+		t.Fatalf("RunLoop: %v", err)
+	}
+	if called {
+		t.Error("execTool must never be called for a tool name not in client.tools")
 	}
 }
 

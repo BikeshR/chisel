@@ -40,3 +40,49 @@ func TestStatusLineWarnsPastThreshold(t *testing.T) {
 		t.Errorf("status line = %q, want a /compact suggestion past the threshold", line)
 	}
 }
+
+func TestStatusLineShowsGitBranchAndDirtyMarker(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3"), gitIsRepo: true, gitBranch: "main", gitDirty: true}
+	line := m.statusLine(200)
+	if !strings.Contains(line, "main*") {
+		t.Errorf("status line = %q, want the branch name with a dirty marker", line)
+	}
+}
+
+func TestStatusLineCleanBranchHasNoDirtyMarker(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3"), gitIsRepo: true, gitBranch: "main", gitDirty: false}
+	line := m.statusLine(200)
+	if strings.Contains(line, "main*") {
+		t.Errorf("status line = %q, want no dirty marker for a clean tree", line)
+	}
+	if !strings.Contains(line, "main") {
+		t.Errorf("status line = %q, want the branch name shown", line)
+	}
+}
+
+func TestStatusLineOmitsGitSegmentWhenNotARepo(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3"), gitIsRepo: false, gitBranch: "main"}
+	line := m.statusLine(200)
+	if strings.Contains(line, "main") {
+		t.Errorf("status line = %q, want no branch shown when gitIsRepo is false", line)
+	}
+}
+
+func TestStatusLineDropsGitSegmentFirstWhenNarrow(t *testing.T) {
+	m := Model{
+		client:         agent.New("minimax-m3"),
+		gitIsRepo:      true,
+		gitBranch:      "a-fairly-long-feature-branch-name",
+		gitDirty:       true,
+		queuedMessages: []string{"one"},
+	}
+	wide := m.statusLine(300)
+	if !strings.Contains(wide, "a-fairly-long-feature-branch-name") {
+		t.Fatalf("wide status line = %q, want the branch shown when there's room", wide)
+	}
+
+	narrow := m.statusLine(40)
+	if strings.Contains(narrow, "a-fairly-long-feature-branch-name") {
+		t.Errorf("narrow status line = %q, want the git segment dropped before other segments", narrow)
+	}
+}

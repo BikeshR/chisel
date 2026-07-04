@@ -53,7 +53,7 @@ func TestHandleToolResultAccountsForSubagentUsage(t *testing.T) {
 	}
 
 	result := agent.ToolResult{ID: "call_1", Content: "subagent's answer", Usage: agent.Usage{InputTokens: 500, OutputTokens: 80}}
-	got, _ := m.handleToolResult(result)
+	got, _ := m.handleToolResult(result, false)
 	gotModel := got.(Model)
 
 	if gotModel.tokensIn != 500 || gotModel.tokensOut != 80 {

@@ -18,6 +18,25 @@ func IsRepo(dir string) bool {
 	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
 
+// Branch returns dir's current git branch name, and whether one could
+// actually be resolved — false for a detached HEAD (rev-parse reports
+// the literal string "HEAD" then, not a real branch name) or dir not
+// being a repo at all, rather than surfacing either as a confusing
+// "branch" of "HEAD".
+func Branch(dir string) (name string, ok bool) {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	name = strings.TrimSpace(string(out))
+	if name == "" || name == "HEAD" {
+		return "", false
+	}
+	return name, true
+}
+
 // DirtyPaths returns the set of paths git considers changed in dir —
 // staged or not, tracked or not — as they appear in `git status
 // --porcelain -z` (relative to dir). The -z form is what makes this
@@ -58,6 +77,29 @@ func DirtyPaths(dir string) (map[string]bool, error) {
 	return paths, nil
 }
 
+// missingGitIdentityArgs returns "-c user.name=..."/"-c user.email=..."
+// pairs for whichever of the two dir's git config doesn't already
+// resolve (checking local config, then global, the same cascade `git
+// config` itself uses) — empty if both are already set, so a user with
+// a real identity configured never has it silently replaced.
+func missingGitIdentityArgs(dir string) []string {
+	var args []string
+	if !gitConfigResolves(dir, "user.name") {
+		args = append(args, "-c", "user.name=chisel")
+	}
+	if !gitConfigResolves(dir, "user.email") {
+		args = append(args, "-c", "user.email=chisel@localhost")
+	}
+	return args
+}
+
+func gitConfigResolves(dir, key string) bool {
+	cmd := exec.Command("git", "config", key)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
+}
+
 // CommitNewlyChanged stages only the paths that are dirty now but
 // weren't in before, and commits them with message — before is typically
 // a DirtyPaths snapshot taken right when a turn started. Committing only
@@ -88,7 +130,16 @@ func CommitNewlyChanged(dir string, before map[string]bool, message string) (sha
 		return "", fmt.Errorf("git add: %w: %s", err, out)
 	}
 
-	commit := exec.Command("git", "commit", "-m", message)
+	// Fills in only whatever piece of the identity is actually unset —
+	// unlike internal/checkpoint's shadow repo (chisel's own private
+	// thing, always committed as "chisel"), this is the user's real
+	// repository, so an identity they DO have configured (local or
+	// global) is never overridden, just backstopped against git's
+	// otherwise-hard "Please tell me who you are" failure for someone
+	// who simply never set one up. -c is process-local, not written to
+	// the repo's own config.
+	args := append(missingGitIdentityArgs(dir), "commit", "-m", message)
+	commit := exec.Command("git", args...)
 	commit.Dir = dir
 	if out, err := commit.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("git commit: %w: %s", err, out)

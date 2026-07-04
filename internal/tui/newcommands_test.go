@@ -8,6 +8,7 @@ import (
 	"github.com/BikeshR/chisel/internal/customcmd"
 	"github.com/BikeshR/chisel/internal/hooks"
 	"github.com/BikeshR/chisel/internal/mcp"
+	"github.com/BikeshR/chisel/internal/session"
 )
 
 func TestHandleHelpCommandListsCommandsAndKeys(t *testing.T) {
@@ -82,6 +83,30 @@ func TestHandleStatusCommandReportsWorkdirHooksAndMemory(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("status output missing %q: %+v", want, lines)
 		}
+	}
+}
+
+// TestHandleStatusCommandShowsFriendlySessionTitle is the regression
+// test for a UX gap: /status used to print the raw session ID, a
+// timestamp string, rather than the same human-readable title /sessions
+// already derives for the same session (deriveTitle, via session.List).
+func TestHandleStatusCommandShowsFriendlySessionTitle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := "/home/brana/code/testproj"
+	id := session.NewID()
+	if err := session.Save(workDir, id, []agent.Message{{Role: "user", Content: "fix the login bug"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := Model{workDir: workDir, sessionID: id, messages: []agent.Message{{Role: "user", Content: "fix the login bug"}}}
+	got := m.handleStatusCommand()
+	joined := strings.Join(got.renderedLines(), "\n")
+
+	if strings.Contains(joined, id) {
+		t.Errorf("status output = %q, want the friendly title, not the raw timestamp id %q", joined, id)
+	}
+	if !strings.Contains(joined, "fix the login bug") {
+		t.Errorf("status output = %q, want the derived session title shown", joined)
 	}
 }
 

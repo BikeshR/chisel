@@ -69,7 +69,7 @@ func TestHandleToolResultExtractsTodos(t *testing.T) {
 		},
 	}
 
-	got, _ := m.handleToolResult(agent.ToolResult{ID: "call_1", Content: "todo list updated (1 items)"})
+	got, _ := m.handleToolResult(agent.ToolResult{ID: "call_1", Content: "todo list updated (1 items)"}, false)
 	gotModel := got.(Model)
 
 	if len(gotModel.todos) != 1 || gotModel.todos[0].Content != "step one" {
@@ -86,7 +86,7 @@ func TestHandleToolResultDoesNotExtractTodosOnFailure(t *testing.T) {
 		},
 	}
 
-	got, _ := m.handleToolResult(agent.ToolResult{ID: "call_1", Content: "invalid status", IsError: true})
+	got, _ := m.handleToolResult(agent.ToolResult{ID: "call_1", Content: "invalid status", IsError: true}, false)
 	gotModel := got.(Model)
 
 	if len(gotModel.todos) != 1 || gotModel.todos[0].Content != "existing" {

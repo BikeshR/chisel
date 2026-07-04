@@ -44,10 +44,27 @@ func startExternalEditor(initial string) tea.Cmd {
 	if editor == "" {
 		editor = "vi"
 	}
-	cmd := exec.Command(editor, path)
+	cmd := editorCommand(editor, path)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return editorDoneMsg{path: path, err: err}
 	})
+}
+
+// editorCommand builds the *exec.Cmd that runs editor against path —
+// split out from startExternalEditor for testability (tea.ExecProcess's
+// own Cmd only returns an internal bubbletea message when called
+// directly outside a real Program; it doesn't actually run anything, so
+// the command construction has to be checkable on its own).
+//
+// Run through a shell rather than exec.Command(editor, path) directly —
+// $EDITOR commonly carries its own arguments (EDITOR="code -w",
+// EDITOR="emacsclient -t" are both common), which exec.Command would
+// otherwise treat as a single literal (nonexistent) binary name
+// including the space. "$1" is the temp path, correctly quoted
+// regardless of what's in $EDITOR; "--" as $0 is just a placeholder,
+// the same convention `sh -c '...' -- "$@"` idioms use elsewhere.
+func editorCommand(editor, path string) *exec.Cmd {
+	return exec.Command("sh", "-c", editor+` "$1"`, "--", path)
 }
 
 // handleEditorDone loads the external editor's saved content back into

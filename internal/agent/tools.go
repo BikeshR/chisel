@@ -169,7 +169,11 @@ func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *Ba
 	}
 
 	if err != nil {
-		return ToolResult{ID: call.ID, Content: err.Error(), IsError: true, Usage: usage}
+		// Same cap as the success path — a bash command that produces a
+		// lot of output before its timeout fires embeds all of it in the
+		// timeout error (see BashSession.run), and an uncapped error would
+		// otherwise get resent in full on every request until /compact.
+		return ToolResult{ID: call.ID, Content: TruncateOutput(err.Error()), IsError: true, Usage: usage}
 	}
 	return ToolResult{ID: call.ID, Content: TruncateOutput(content), Usage: usage}
 }

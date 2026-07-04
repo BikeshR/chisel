@@ -21,23 +21,21 @@ type Registry struct {
 	servers map[string]*Server
 }
 
-// LoadAndStartAll reads ~/.chisel/mcp.json (if present) and starts every
-// configured server concurrently — sequentially, one server's handshake
-// (which can mean an npx cold download) blocked every other server's,
-// and the whole app launch behind all of them; started in parallel, the
-// wait is bounded by the slowest single server instead of their sum. A
-// server that fails to start is not fatal to chisel as a whole — its
-// error is returned alongside a Registry holding whatever did start, so
-// the rest of the tool set still works.
-func LoadAndStartAll() (*Registry, []error) {
-	cfg, ok, err := LoadConfig()
-	if err != nil {
-		return &Registry{servers: map[string]*Server{}}, []error{fmt.Errorf("load mcp config: %w", err)}
-	}
-	if !ok {
-		return &Registry{servers: map[string]*Server{}}, nil
-	}
-
+// LoadAndStartAll starts every server in cfg concurrently — sequentially,
+// one server's handshake (which can mean an npx cold download) blocked
+// every other server's, and the whole app launch behind all of them;
+// started in parallel, the wait is bounded by the slowest single server
+// instead of their sum. A server that fails to start is not fatal to
+// chisel as a whole — its error is returned alongside a Registry holding
+// whatever did start, so the rest of the tool set still works.
+//
+// Takes an already-loaded Config rather than reading one itself — cfg is
+// typically LoadConfig's user-scoped result merged with
+// LoadProjectConfig's project-scoped one (see Merge), and the caller
+// (main.go) needs to apply a trust gate to the project half before
+// anything in it is allowed to start, the same reasoning hooks/permrules
+// already gate their own project-scoped config before use.
+func LoadAndStartAll(cfg Config) (*Registry, []error) {
 	names := make([]string, 0, len(cfg.MCPServers))
 	for name := range cfg.MCPServers {
 		names = append(names, name)
@@ -153,7 +151,7 @@ func (r *Registry) Statuses() []ServerStatus {
 	}
 	out := make([]ServerStatus, 0, len(r.servers))
 	for name, s := range r.servers {
-		out = append(out, ServerStatus{Name: name, Broken: s.broken})
+		out = append(out, ServerStatus{Name: name, Broken: s.broken.Load()})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out

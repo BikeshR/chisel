@@ -141,7 +141,11 @@ func TestLoadAndStartAllRejectsServerNameContainingDoubleUnderscore(t *testing.T
 		t.Fatal(err)
 	}
 
-	r, errs := LoadAndStartAll()
+	cfg, _, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, errs := LoadAndStartAll(cfg)
 	if len(errs) != 1 {
 		t.Fatalf("got %d errors, want exactly 1: %v", len(errs), errs)
 	}
@@ -201,8 +205,12 @@ func TestLoadAndStartAllStartsServersConcurrently(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	loadedCfg, _, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
 	start := time.Now()
-	r, errs := LoadAndStartAll()
+	r, errs := LoadAndStartAll(loadedCfg)
 	elapsed := time.Since(start)
 	defer r.Close()
 

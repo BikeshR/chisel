@@ -103,5 +103,33 @@ func (s Store) Trust(hash string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	return writeAtomic(path, data)
+}
+
+// writeAtomic writes data to path via a temp file plus rename — the
+// same pattern internal/session's Save already uses, for the same
+// reason: a plain os.WriteFile can leave a truncated, corrupt file
+// behind if chisel is killed mid-write, and two chisel processes
+// trusting content at the same time would otherwise race on a partial
+// write rather than one fully winning.
+func writeAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".trust-*.json.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }() // no-op once the rename below succeeds
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }

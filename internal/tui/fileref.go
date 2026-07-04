@@ -25,9 +25,18 @@ var fileRefPattern = regexp.MustCompile(`@(\S+)`)
 // Only affects what's sent to the model (see submitText) — the
 // transcript still shows exactly what the user typed, not the expanded
 // form, so a large injected file doesn't turn the display into a wall
-// of text every time.
-func expandFileReferences(workDir, text string) string {
-	return fileRefPattern.ReplaceAllStringFunc(text, func(match string) string {
+// of text every time. Injected content is capped the same way a tool
+// result already is (agent.TruncateOutput) — without this, an
+// @-referenced multi-megabyte log (or an accidentally-referenced
+// binary) bypassed that cap entirely and invisibly: the whole point of
+// capping tool output at maxToolOutputChars is that oversized content
+// gets resent on *every* subsequent request in the conversation, and an
+// @-reference is otherwise the one path into the context window with no
+// bound at all. truncated reports which referenced paths actually hit
+// the cap, so submitText can still surface that to the user even though
+// the transcript itself only ever shows what they typed.
+func expandFileReferences(workDir, text string) (expanded string, truncated []string) {
+	expanded = fileRefPattern.ReplaceAllStringFunc(text, func(match string) string {
 		path := strings.TrimPrefix(match, "@")
 		content, err := agent.ReadFileInWorkDir(workDir, path)
 		if err != nil {
@@ -38,8 +47,13 @@ func expandFileReferences(workDir, text string) string {
 			// about it if that matters.
 			return match
 		}
-		return fmt.Sprintf("\n--- %s ---\n%s\n--- end %s ---\n", path, content, path)
+		capped := agent.TruncateOutput(content)
+		if capped != content {
+			truncated = append(truncated, path)
+		}
+		return fmt.Sprintf("\n--- %s ---\n%s\n--- end %s ---\n", path, capped, path)
 	})
+	return expanded, truncated
 }
 
 // fileRefSkipDirs is the set of directories @file tab completion never

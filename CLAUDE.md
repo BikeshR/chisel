@@ -21,7 +21,8 @@ make integration-test  # live tests against the real API — needs CHISEL_API_KE
 make fmt               # gofmt -l . (fails if anything is unformatted)
 make vet               # go vet ./...
 make lint              # golangci-lint run ./... — install separately, see golangci-lint.run
-make check             # fmt + vet + lint + test, in that order
+make tidy               # go mod tidy -diff — catches go.mod drift (e.g. a direct import mismarked indirect) without rewriting anything
+make check             # fmt + vet + lint + tidy + test, in that order
 make install            # go install . — puts chisel on $(go env GOPATH)/bin
 ```
 

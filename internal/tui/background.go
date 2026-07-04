@@ -137,6 +137,27 @@ func (m Model) handleBackgroundTaskStarted(msg backgroundTaskStartedMsg) Model {
 // "check on it" tool, and notifies the user (bell/OSC9) the same way a
 // permission prompt or turn completion does, since this is exactly the
 // same "chisel needs your attention" moment, just on its own schedule.
+//
+// The transcript line and notification always happen immediately — pure
+// UI, no correctness risk either way. Appending to m.messages is
+// different: if this fires *mid-turn* (a later tool call in the same
+// turn still executing, or a permission prompt up), inserting it now
+// would land it between an assistant's tool_calls and their own
+// results, a shape every OpenAI-compatible endpoint rejects. Only
+// append (and save) immediately when chisel is genuinely idle already;
+// otherwise buffer it in pendingBackgroundResults for
+// mergeBufferedBackgroundResults to fold in once the current turn
+// actually settles.
+//
+// "Idle" is stateInput *and* an empty pendingUses, not stateInput alone:
+// pressing "n" at a permission prompt drops back to stateInput with the
+// denial-reason prompt up (handleKey's stateAwaitingPermission "n" case)
+// while pendingUses is still unresolved — m.messages still ends with a
+// dangling assistant tool_calls message at that point. A background
+// task finishing in that window would otherwise land its synthetic
+// message between the tool_calls and their eventual results (added once
+// the denial reason is submitted), the exact API-invalid shape this
+// buffering exists to prevent.
 func (m Model) handleBackgroundTaskDone(msg backgroundTaskDoneMsg) (Model, tea.Cmd) {
 	command := msg.id
 	if task, ok := m.backgroundTasks[msg.id]; ok {
@@ -152,9 +173,20 @@ func (m Model) handleBackgroundTaskDone(msg backgroundTaskDoneMsg) (Model, tea.C
 	m.appendLine(dimStyle.Render("── " + summary + " ──"))
 
 	content := fmt.Sprintf("[%s]\n\n%s", summary, agent.TruncateOutput(msg.output))
-	m.messages = append(m.messages, agent.Message{Role: "user", Content: content})
+	resultMsg := agent.Message{Role: "user", Content: content}
 
-	return m, tea.Batch(saveSession(m.workDir, m.messages), notifyIdle(summary))
+	// A background command (a build, a script, a deploy) can change git
+	// state just as easily as a foreground tool call can — refresh the
+	// cached status-bar segment either way, not just once the turn ends.
+	gitStatus := refreshGitStatus(m.workDir)
+
+	if m.state != stateInput || len(m.pendingUses) != 0 {
+		m.pendingBackgroundResults = append(m.pendingBackgroundResults, resultMsg)
+		return m, tea.Batch(notifyIdle(summary), gitStatus)
+	}
+
+	m.messages = append(m.messages, resultMsg)
+	return m, tea.Batch(saveSession(m.workDir, m.sessionID, m.messages), notifyIdle(summary), gitStatus)
 }
 
 // CancelBackgroundTasks kills every still-running background task's

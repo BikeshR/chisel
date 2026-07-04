@@ -1,4 +1,4 @@
-.PHONY: build test integration-test install fmt vet lint check clean
+.PHONY: build test integration-test install fmt vet lint tidy check clean
 
 build:
 	go build -o chisel .
@@ -19,6 +19,13 @@ fmt:
 vet:
 	go vet ./...
 
+# Catches a direct import mismarked as indirect in go.mod (or the
+# reverse) — go.sum staying consistent doesn't catch that, only tidy
+# does. -diff reports without rewriting go.mod/go.sum, so this is safe
+# to run in CI.
+tidy:
+	go mod tidy -diff
+
 # golangci-lint isn't a Go stdlib tool — install it once via
 # https://golangci-lint.run/welcome/install/ (a package manager or the
 # install script; `go install` is not the currently recommended path).
@@ -28,7 +35,7 @@ lint:
 	}
 	golangci-lint run ./...
 
-check: fmt vet lint test
+check: fmt vet lint tidy test
 	@echo "all checks passed"
 
 install:

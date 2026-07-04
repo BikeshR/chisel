@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/hooks"
 )
 
 func TestNewTurnContextCancelable(t *testing.T) {
@@ -113,6 +115,113 @@ func TestInterruptibleResultText(t *testing.T) {
 	}
 	if got := interruptibleResultText("file not found"); got != "file not found" {
 		t.Errorf("got %q, want unchanged", got)
+	}
+}
+
+// TestHandleToolResultInterruptedStopsWholeTurn is the regression test
+// for a real bug: esc during a tool call only ever cancelled that one
+// call's own context — newTurnContext hands the *next* pending call (if
+// any) a fresh, uncancelled context, so the turn just continued: the
+// rest of pendingUses dispatched normally, and once they all resolved
+// chisel went right back to the model with them, which typically just
+// retried. A single esc must stop the whole turn, not one call in it.
+func TestHandleToolResultInterruptedStopsWholeTurn(t *testing.T) {
+	m := Model{
+		workDir: t.TempDir(),
+		state:   stateExecutingTool,
+		pendingUses: []agent.ToolCall{
+			{ID: "call_1", Function: agent.ToolCallFunction{Name: "bash"}},
+			{ID: "call_2", Function: agent.ToolCallFunction{Name: "bash"}},
+			{ID: "call_3", Function: agent.ToolCallFunction{Name: "bash"}},
+		},
+	}
+
+	got, cmd := m.handleToolResult(agent.ToolResult{ID: "call_1", Content: context.Canceled.Error(), IsError: true}, true)
+	gotModel := got.(Model)
+
+	if gotModel.state != stateInput {
+		t.Errorf("state = %v, want stateInput — esc during a tool call must stop the whole turn", gotModel.state)
+	}
+	if len(gotModel.pendingUses) != 0 {
+		t.Errorf("pendingUses = %+v, want all resolved rather than left to dispatch normally", gotModel.pendingUses)
+	}
+	if len(gotModel.messages) != 3 {
+		t.Fatalf("messages = %+v, want 3 tool results — one real (call_1), two synthetic (call_2, call_3)", gotModel.messages)
+	}
+	for i, id := range []string{"call_1", "call_2", "call_3"} {
+		if gotModel.messages[i].ToolCallID != id {
+			t.Errorf("messages[%d].ToolCallID = %q, want %q", i, gotModel.messages[i].ToolCallID, id)
+		}
+	}
+	if !strings.Contains(gotModel.messages[1].Content, "Interrupted") {
+		t.Errorf("messages[1] (never-run call_2) = %+v, want it marked as interrupted, not silently omitted", gotModel.messages[1])
+	}
+
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd (save + flush + dequeue)")
+	}
+	found := false
+	for _, l := range gotModel.renderedLines() {
+		if strings.Contains(l, "2 more queued tool call") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("lines = %+v, want a line noting the 2 skipped calls", gotModel.renderedLines())
+	}
+}
+
+// TestHandleToolResultNotInterruptedStillDispatchesRemainingCalls is the
+// contrast case: a normal (non-cancelled) tool result with more pending
+// calls must keep dispatching them exactly as before — the interrupted
+// flag, not just a non-empty pendingUses, is what changed here.
+func TestHandleToolResultNotInterruptedStillDispatchesRemainingCalls(t *testing.T) {
+	m := Model{
+		client:  agent.New("minimax-m3"),
+		workDir: t.TempDir(),
+		state:   stateExecutingTool,
+		pendingUses: []agent.ToolCall{
+			{ID: "call_1", Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"echo hi"}`}},
+			{ID: "call_2", Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"echo bye"}`}},
+		},
+	}
+
+	got, _ := m.handleToolResult(agent.ToolResult{ID: "call_1", Content: "hi"}, false)
+	gotModel := got.(Model)
+
+	if gotModel.state != stateAwaitingPermission && gotModel.state != stateExecutingTool {
+		t.Errorf("state = %v, want the next pending call to still be dispatched (permission prompt or straight to execution)", gotModel.state)
+	}
+	if len(gotModel.pendingUses) != 1 || gotModel.pendingUses[0].ID != "call_2" {
+		t.Errorf("pendingUses = %+v, want call_2 still queued to dispatch normally", gotModel.pendingUses)
+	}
+}
+
+// TestExecuteToolMarksInterruptedOnCancelledContext confirms the signal
+// handleToolResult's interrupted handling depends on: executeTool must
+// set toolResultMsg.interrupted from ctx.Err() directly, not leave it to
+// be inferred later from the stringified error content (which already
+// broke once for a wrapped MCP error).
+func TestExecuteToolMarksInterruptedOnCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before the call ever starts
+
+	call := agent.ToolCall{ID: "call_1", Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"echo hi"}`}}
+	bash := agent.NewBashSession(t.TempDir())
+	defer bash.Close()
+
+	cmd := executeTool(ctx, t.TempDir(), "minimax-m3", bash, nil, hooks.Config{}, nil, call)
+	msg := cmd()
+
+	result, ok := msg.(toolResultMsg)
+	if !ok {
+		t.Fatalf("expected toolResultMsg, got %T", msg)
+	}
+	if !result.interrupted {
+		t.Error("expected interrupted = true for a call run with an already-cancelled context")
+	}
+	if !result.result.IsError {
+		t.Error("expected the result itself to also be an error")
 	}
 }
 

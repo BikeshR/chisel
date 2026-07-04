@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -112,6 +113,147 @@ func TestMCPCallArgsPreviewEmptyForNonMCPCall(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"ls"}`}}
 	if got := mcpCallArgsPreview(call); got != "" {
 		t.Errorf("preview = %q, want empty for a non-MCP call", got)
+	}
+}
+
+func TestPersistableRuleForBash(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"go test ./..."}`}}
+	toolName, pattern, ok := persistableRuleFor(call)
+	if !ok || toolName != "bash" || pattern != "go test ./..." {
+		t.Errorf("got (%q, %q, %v), want (\"bash\", \"go test ./...\", true)", toolName, pattern, ok)
+	}
+}
+
+func TestPersistableRuleForExcludesEditsAndMCP(t *testing.T) {
+	cases := []agent.ToolCall{
+		{Function: agent.ToolCallFunction{Name: "str_replace_based_edit_tool", Arguments: `{"command":"str_replace","path":"a.go","old_str":"x","new_str":"y"}`}},
+		{Function: agent.ToolCallFunction{Name: "mcp__github__create_issue", Arguments: `{}`}},
+		{Function: agent.ToolCallFunction{Name: "glob", Arguments: `{"pattern":"**/*.go"}`}},
+	}
+	for _, call := range cases {
+		if _, _, ok := persistableRuleFor(call); ok {
+			t.Errorf("expected %s to not support a persistent rule", call.Function.Name)
+		}
+	}
+}
+
+func TestPressingPWritesPermanentRuleAndRuns(t *testing.T) {
+	workDir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	m := Model{
+		client:  agent.New("minimax-m3"),
+		workDir: workDir,
+		state:   stateAwaitingPermission,
+		pendingUses: []agent.ToolCall{
+			{ID: "call_1", Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"npm test"}`}},
+		},
+	}
+
+	got, cmd := m.handleKey(tea.KeyMsg{Runes: []rune("p"), Type: tea.KeyRunes})
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd — 'p' should run the call like 'y' does")
+	}
+	gotModel := got.(Model)
+	if gotModel.state != stateExecutingTool {
+		t.Errorf("state = %v, want stateExecutingTool", gotModel.state)
+	}
+
+	if decision, matched := permrules.Match(gotModel.permRules, "bash", "npm test"); !matched || decision != permrules.Allow {
+		t.Errorf("in-memory permRules Match = (%v, %v), want (Allow, true)", decision, matched)
+	}
+
+	loaded, found, err := permrules.Load(workDir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !found {
+		t.Fatal("expected permissions.json to have been written")
+	}
+	if decision, matched := permrules.Match(loaded, "bash", "npm test"); !matched || decision != permrules.Allow {
+		t.Errorf("Match after reload = (%v, %v), want (Allow, true)", decision, matched)
+	}
+
+	data, err := os.ReadFile(permrules.ConfigPath(workDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted, err := permrules.IsTrusted(permrules.ContentHash(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !trusted {
+		t.Error("expected the newly written permissions.json to be auto-trusted")
+	}
+}
+
+// TestPressingPDoesNotClobberExistingRulesWhenInMemoryStateIsStale is the
+// regression test for a real destructive bug: the "p" handler used to
+// build the new rule set on top of m.permRules directly. If that was nil
+// (trust declined at startup, or the file parse-errored then) or simply
+// stale (the file was written to disk after this session already
+// loaded/cached it), Save would overwrite the real file with only the
+// one new rule — silently destroying an existing repo-provided policy,
+// then auto-trusting the result.
+func TestPressingPDoesNotClobberExistingRulesWhenInMemoryStateIsStale(t *testing.T) {
+	workDir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+
+	// A rule already exists on disk that this session's in-memory
+	// m.permRules doesn't know about — e.g. trust was declined at
+	// startup, so main.go set permRules = nil, or the file changed since.
+	existing := permrules.Add(nil, "bash", "git push --force*", permrules.Deny)
+	if err := permrules.Save(workDir, existing); err != nil {
+		t.Fatal(err)
+	}
+
+	m := Model{
+		client:    agent.New("minimax-m3"),
+		workDir:   workDir,
+		state:     stateAwaitingPermission,
+		permRules: nil, // stale/declined in-memory state — the file on disk has more than this
+		pendingUses: []agent.ToolCall{
+			{ID: "call_1", Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"npm test"}`}},
+		},
+	}
+
+	if _, cmd := m.handleKey(tea.KeyMsg{Runes: []rune("p"), Type: tea.KeyRunes}); cmd == nil {
+		t.Fatal("expected a non-nil Cmd — 'p' should run the call")
+	}
+
+	loaded, found, err := permrules.Load(workDir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !found {
+		t.Fatal("expected permissions.json to still exist")
+	}
+
+	// The pre-existing deny rule must have survived.
+	if decision, matched := permrules.Match(loaded, "bash", "git push --force origin main"); !matched || decision != permrules.Deny {
+		t.Errorf("pre-existing rule Match = (%v, %v), want (Deny, true) — it must not be clobbered", decision, matched)
+	}
+	// The newly added rule must also be present.
+	if decision, matched := permrules.Match(loaded, "bash", "npm test"); !matched || decision != permrules.Allow {
+		t.Errorf("new rule Match = (%v, %v), want (Allow, true)", decision, matched)
+	}
+}
+
+func TestPressingPOnIneligibleCallStillApproves(t *testing.T) {
+	m := Model{
+		client: agent.New("minimax-m3"),
+		state:  stateAwaitingPermission,
+		pendingUses: []agent.ToolCall{
+			{ID: "call_1", Function: agent.ToolCallFunction{Name: "str_replace_based_edit_tool", Arguments: `{"command":"create","path":"a.go","file_text":"x"}`}},
+		},
+	}
+
+	got, cmd := m.handleKey(tea.KeyMsg{Runes: []rune("p"), Type: tea.KeyRunes})
+	if cmd == nil {
+		t.Fatal("expected 'p' to still approve and run an ineligible call")
+	}
+	gotModel := got.(Model)
+	if gotModel.state != stateExecutingTool {
+		t.Errorf("state = %v, want stateExecutingTool", gotModel.state)
 	}
 }
 

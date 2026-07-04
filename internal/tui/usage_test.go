@@ -27,6 +27,23 @@ func TestHandleUsageCommandShowsCounts(t *testing.T) {
 	}
 }
 
+// TestUsageCommandDoesNotClaimSessionScope is the regression test for a
+// labeling bug: these counters are process-lifetime and were never
+// reset or reloaded across /new or /resume, but the output used to say
+// "session usage" — misleading now that /sessions and /resume mean one
+// process can span several distinct saved conversations.
+func TestUsageCommandDoesNotClaimSessionScope(t *testing.T) {
+	m := Model{requestCount: 1}
+	got := m.handleUsageCommand()
+	joined := strings.Join(got.renderedLines(), "\n")
+	if strings.Contains(joined, "session usage") {
+		t.Errorf("output = %q, want no claim this is scoped to the current session", joined)
+	}
+	if !strings.Contains(joined, "since launch") {
+		t.Errorf("output = %q, want it labeled as process-lifetime (\"since launch\")", joined)
+	}
+}
+
 // TestUsageCommandDoesNotClaimADollarAmount is the point of this
 // feature's scope: OpenCode Go's own "cost" field reads "0" regardless
 // of request size (verified against the live API before building
@@ -62,14 +79,14 @@ func TestRequestCountIncrementsOnSubagentUsageOnly(t *testing.T) {
 	}
 
 	// A plain tool result (no usage) shouldn't count as a request.
-	got, _ := m.handleToolResult(agent.ToolResult{ID: "call_1", Content: "no matches"})
+	got, _ := m.handleToolResult(agent.ToolResult{ID: "call_1", Content: "no matches"}, false)
 	gotModel := got.(Model)
 	if gotModel.requestCount != 0 {
 		t.Errorf("requestCount = %d, want 0 for a plain tool result", gotModel.requestCount)
 	}
 
 	// A subagent result carrying real usage should count as one.
-	got, _ = gotModel.handleToolResult(agent.ToolResult{ID: "call_2", Content: "summary", Usage: agent.Usage{InputTokens: 500, OutputTokens: 100}})
+	got, _ = gotModel.handleToolResult(agent.ToolResult{ID: "call_2", Content: "summary", Usage: agent.Usage{InputTokens: 500, OutputTokens: 100}}, false)
 	gotModel = got.(Model)
 	if gotModel.requestCount != 1 {
 		t.Errorf("requestCount = %d, want 1 after a subagent call with real usage", gotModel.requestCount)

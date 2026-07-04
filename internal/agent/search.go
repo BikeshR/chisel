@@ -146,6 +146,7 @@ func runGrep(workDir string, rawInput json.RawMessage) (string, error) {
 	}
 
 	var results []string
+	var scanErrors []string
 	err = filepath.WalkDir(workDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			// A permission-denied (or similarly unreadable) directory or
@@ -210,17 +211,30 @@ func runGrep(workDir string, rawInput json.RawMessage) (string, error) {
 				}
 			}
 		}
+		// scanner.Err() is nil for a clean EOF — the only other cause is a
+		// single line exceeding the 1MB buffer above, which stops Scan()
+		// silently partway through the file. Without checking this, a
+		// file with one over-long line was searched only up to that
+		// point, with grep reporting a normal, complete-looking result
+		// that just happened to be missing everything after it.
+		if scanErr := scanner.Err(); scanErr != nil {
+			scanErrors = append(scanErrors, rel)
+		}
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
 
-	if len(results) == 0 {
+	if len(results) == 0 && len(scanErrors) == 0 {
 		return "(no matches)", nil
 	}
 	if len(results) >= grepResultLimit {
 		results = append(results, fmt.Sprintf("… truncated at %d matches", grepResultLimit))
+	}
+	if len(scanErrors) > 0 {
+		results = append(results, fmt.Sprintf("(note: %d file(s) had a line too long to fully scan and may be missing matches: %s)",
+			len(scanErrors), strings.Join(scanErrors, ", ")))
 	}
 	return strings.Join(results, "\n"), nil
 }

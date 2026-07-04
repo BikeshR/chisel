@@ -44,10 +44,11 @@ func (m Model) runBang(command string) (Model, tea.Cmd) {
 	}
 }
 
-// handleBangResult renders a bang command's raw output in full — unlike
-// a tool result (truncated to one line for the model's benefit), the
-// user asked for this directly and expects to see all of it, the same
-// as running it in a real shell.
+// handleBangResult renders a bang command's output — capped by the same
+// TruncateOutput a tool result gets, not shown truly unbounded; unlike a
+// tool result's single-line-for-the-model cap, though, the full (if
+// large) output up to that cap is shown, since the user asked for this
+// directly and expects to see close to what a real shell would print.
 func (m Model) handleBangResult(msg bangResultMsg) (Model, tea.Cmd) {
 	m.endTurn()
 	m.state = stateInput
@@ -58,5 +59,9 @@ func (m Model) handleBangResult(msg bangResultMsg) (Model, tea.Cmd) {
 		m.appendLine(agent.TruncateOutput(msg.output))
 	}
 
-	return m, m.dequeueOrSubmit()
+	// A bang command can change git state (checkout, commit, stash) just
+	// as easily as a tool call can — refresh the cached status-bar
+	// segment rather than leaving it stale until the next model turn.
+	flush := m.flushPendingBackgroundResults()
+	return m, tea.Batch(flush, m.dequeueOrSubmit(), refreshGitStatus(m.workDir))
 }

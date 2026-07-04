@@ -8,6 +8,7 @@ import (
 
 	"github.com/BikeshR/chisel/internal/agent"
 	"github.com/BikeshR/chisel/internal/checkpoint"
+	"github.com/BikeshR/chisel/internal/session"
 )
 
 func newCheckpointTestModel(t *testing.T) (Model, string) {
@@ -21,6 +22,7 @@ func newCheckpointTestModel(t *testing.T) (Model, string) {
 	return Model{
 		client:          agent.New("minimax-m3"),
 		workDir:         workDir,
+		sessionID:       "test-session",
 		checkpointStore: store,
 		state:           stateInput,
 	}, workDir
@@ -28,7 +30,7 @@ func newCheckpointTestModel(t *testing.T) (Model, string) {
 
 func TestRewindListsWhenEmpty(t *testing.T) {
 	m, _ := newCheckpointTestModel(t)
-	got := m.handleRewindCommand(nil)
+	got, _ := m.handleRewindCommand(nil)
 	lines := got.renderedLines()
 	if len(lines) != 1 || !strings.Contains(lines[0], "no checkpoints yet") {
 		t.Errorf("lines = %+v", lines)
@@ -37,7 +39,7 @@ func TestRewindListsWhenEmpty(t *testing.T) {
 
 func TestRewindUnavailableWithoutStore(t *testing.T) {
 	m := Model{state: stateInput}
-	got := m.handleRewindCommand(nil)
+	got, _ := m.handleRewindCommand(nil)
 	lines := got.renderedLines()
 	if len(lines) != 1 || !strings.Contains(lines[0], "aren't available") {
 		t.Errorf("lines = %+v, want a not-available message", lines)
@@ -47,7 +49,7 @@ func TestRewindUnavailableWithoutStore(t *testing.T) {
 func TestRewindBlockedMidTurn(t *testing.T) {
 	m, _ := newCheckpointTestModel(t)
 	m.state = stateWaitingModel
-	got := m.handleRewindCommand(nil)
+	got, _ := m.handleRewindCommand(nil)
 	lines := got.renderedLines()
 	if len(lines) != 1 || !strings.Contains(lines[0], "in progress") {
 		t.Errorf("lines = %+v, want an in-progress error", lines)
@@ -95,14 +97,20 @@ func TestRewindFullFlow(t *testing.T) {
 		t.Fatalf("messages = %+v, want 4 before rewinding", m.messages)
 	}
 
+	// Stale state from the pre-rewind conversation that must not survive
+	// into the rewound one.
+	m.lastToolResultIdx = 3
+	m.lastToolCallKey = "bash\x00{\"command\":\"rm -rf /tmp/x\"}"
+	m.toolCallRepeatCount = 2
+
 	// /rewind 1 should target the checkpoint taken before the most
 	// recent (second) turn.
-	m = m.handleRewindCommand([]string{"1"})
+	m, _ = m.handleRewindCommand([]string{"1"})
 	if m.pendingRewind == nil || m.pendingRewind.hash != hash2 {
 		t.Fatalf("pendingRewind = %+v, want it to target hash2 (%s)", m.pendingRewind, hash2)
 	}
 
-	m = m.handleRewindCommand([]string{"confirm"})
+	m, cmd := m.handleRewindCommand([]string{"confirm"})
 	if m.pendingRewind != nil {
 		t.Error("pendingRewind should be cleared after confirm")
 	}
@@ -125,11 +133,42 @@ func TestRewindFullFlow(t *testing.T) {
 	if len(m.checkpoints) != 1 || m.checkpoints[0].hash != hash1 {
 		t.Errorf("checkpoints = %+v, want only the first-turn checkpoint remaining", m.checkpoints)
 	}
+
+	if m.lastToolResultIdx != -1 || m.lastToolCallKey != "" || m.toolCallRepeatCount != 0 {
+		t.Errorf("lastToolResultIdx=%d lastToolCallKey=%q toolCallRepeatCount=%d, want all reset after rewind",
+			m.lastToolResultIdx, m.lastToolCallKey, m.toolCallRepeatCount)
+	}
+
+	// TestRewindPersistsConversationToDisk is the regression test for a
+	// real bug: /rewind confirm never returned a Cmd, so the truncated
+	// conversation was never saved — quitting right after a rewind
+	// resumed the *pre-rewind* conversation against the *rewound* files
+	// on next launch.
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd to persist the rewound conversation immediately")
+	}
+	for _, sub := range unpackBatch(t, cmd) {
+		if sub == nil {
+			continue
+		}
+		if msg := sub(); msg != nil {
+			if _, isGitStatus := msg.(gitStatusMsg); !isGitStatus {
+				t.Errorf("sub-cmd() = %v, want nil or a gitStatusMsg", msg)
+			}
+		}
+	}
+	resumed, _, ok := session.LoadByID(workDir, m.sessionID)
+	if !ok {
+		t.Fatal("expected the rewound conversation to be loadable from disk")
+	}
+	if len(resumed) != 2 || resumed[0].Content != "first turn" {
+		t.Errorf("persisted messages = %+v, want the rewound (truncated) conversation, not the pre-rewind one", resumed)
+	}
 }
 
 func TestRewindConfirmWithoutPendingTarget(t *testing.T) {
 	m, _ := newCheckpointTestModel(t)
-	got := m.handleRewindCommand([]string{"confirm"})
+	got, _ := m.handleRewindCommand([]string{"confirm"})
 	lines := got.renderedLines()
 	if len(lines) != 1 || !strings.Contains(lines[0], "nothing to confirm") {
 		t.Errorf("lines = %+v", lines)
@@ -140,7 +179,7 @@ func TestRewindInvalidIndex(t *testing.T) {
 	m, _ := newCheckpointTestModel(t)
 	m.checkpoints = []checkpointRecord{{hash: "abc", label: "only one"}}
 
-	got := m.handleRewindCommand([]string{"5"})
+	got, _ := m.handleRewindCommand([]string{"5"})
 	lines := got.renderedLines()
 	if len(lines) != 1 || !strings.Contains(lines[0], "usage:") {
 		t.Errorf("lines = %+v, want a usage error for an out-of-range index", lines)
@@ -158,6 +197,68 @@ func TestNewTurnClearsPendingRewind(t *testing.T) {
 	m, _ = m.submitText("something else entirely")
 	if m.pendingRewind != nil {
 		t.Error("starting a new turn should clear a pending rewind confirmation")
+	}
+}
+
+// TestUnrelatedCommandCancelsPendingRewind is the regression test for a
+// real bug: the /rewind prompt promises "type /rewind confirm to
+// proceed, or anything else to cancel," but only starting a new turn,
+// /new, /resume, or /compact actually cleared pendingRewind — an
+// intervening /status, /git, a bang command, etc. left it dangling, so
+// a stray /rewind confirm minutes later (long after the user's mental
+// context had moved on) could still destructively fire.
+func TestUnrelatedCommandCancelsPendingRewind(t *testing.T) {
+	m, _ := newCheckpointTestModel(t)
+	target := checkpointRecord{hash: "abc", label: "some checkpoint"}
+	m.pendingRewind = &target
+
+	m, _ = m.dispatchText("/status")
+	if m.pendingRewind != nil {
+		t.Error("an unrelated command should cancel a pending rewind confirmation")
+	}
+	found := false
+	for _, l := range m.renderedLines() {
+		if strings.Contains(l, "cancelled") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("lines = %+v, want a notice that the rewind confirmation was cancelled", m.renderedLines())
+	}
+
+	// A stray "/rewind confirm" afterward must be a no-op, not
+	// destructively fire against the abandoned target.
+	m, _ = m.dispatchText("/rewind confirm")
+	foundNothingToConfirm := false
+	for _, l := range m.renderedLines() {
+		if strings.Contains(l, "nothing to confirm") {
+			foundNothingToConfirm = true
+		}
+	}
+	if !foundNothingToConfirm {
+		t.Errorf("lines = %+v, want \"nothing to confirm\" for a stray /rewind confirm after cancellation", m.renderedLines())
+	}
+}
+
+// TestRewindFamilyCommandsDoNotSelfCancel confirms /rewind <n> (a
+// different target, or the same one) doesn't trigger the "cancelled"
+// side effect against itself — re-listing, re-targeting, and confirming
+// are all part of the same rewind interaction, not something else
+// interrupting it.
+func TestRewindFamilyCommandsDoNotSelfCancel(t *testing.T) {
+	m, _ := newCheckpointTestModel(t)
+	m.checkpoints = []checkpointRecord{{hash: "abc", label: "only one"}}
+	target := checkpointRecord{hash: "abc", label: "only one"}
+	m.pendingRewind = &target
+
+	m, _ = m.dispatchText("/rewind 1")
+	if m.pendingRewind == nil {
+		t.Fatal("expected /rewind <n> to still set a pending target, not just cancel the old one")
+	}
+	for _, l := range m.renderedLines() {
+		if strings.Contains(l, "cancelled") {
+			t.Errorf("lines = %+v, want no \"cancelled\" notice for a /rewind-family command", m.renderedLines())
+		}
 	}
 }
 

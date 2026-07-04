@@ -179,6 +179,71 @@ func TestHasAnyEmptyConfig(t *testing.T) {
 	}
 }
 
+func TestMarshalJSONRoundTripsThroughUnmarshal(t *testing.T) {
+	cfg := Config{
+		"bash": RuleList{
+			{Pattern: "git *", Decision: Allow},
+			{Pattern: "git push --force*", Decision: Deny},
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var got Config
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal(%s): %v", data, err)
+	}
+	if len(got["bash"]) != 2 || got["bash"][0] != cfg["bash"][0] || got["bash"][1] != cfg["bash"][1] {
+		t.Errorf("round-tripped config = %+v, want %+v", got, cfg)
+	}
+}
+
+func TestAddAppendsRuleAndPreservesOrder(t *testing.T) {
+	cfg := Add(nil, "bash", "git *", Allow)
+	cfg = Add(cfg, "bash", "git push --force*", Deny)
+
+	rules := cfg["bash"]
+	want := []Rule{
+		{Pattern: "git *", Decision: Allow},
+		{Pattern: "git push --force*", Decision: Deny},
+	}
+	if len(rules) != len(want) {
+		t.Fatalf("got %d rules, want %d", len(rules), len(want))
+	}
+	for i := range want {
+		if rules[i] != want[i] {
+			t.Errorf("rules[%d] = %+v, want %+v", i, rules[i], want[i])
+		}
+	}
+
+	// The later, more specific rule must still win via last-match-wins.
+	if decision, _ := Match(cfg, "bash", "git push --force origin main"); decision != Deny {
+		t.Errorf("Match = %v, want Deny (the more specific, later rule)", decision)
+	}
+}
+
+func TestSaveThenLoadRoundTrip(t *testing.T) {
+	workDir := t.TempDir()
+	cfg := Add(nil, "bash", "npm test*", Allow)
+
+	if err := Save(workDir, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, found, err := Load(workDir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !found {
+		t.Fatal("Load: found = false after Save")
+	}
+	if decision, matched := Match(loaded, "bash", "npm test --watch"); !matched || decision != Allow {
+		t.Errorf("Match after Save+Load = (%v, %v), want (Allow, true)", decision, matched)
+	}
+}
+
 func TestTrustRoundTrip(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	hash := ContentHash([]byte(`{"bash":{"git *":"allow"}}`))

@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
@@ -22,6 +21,7 @@ import (
 var builtinCommandNames = []string{
 	"/help", "/model", "/think", "/new", "/compact", "/retry",
 	"/git", "/plan", "/status", "/usage", "/rewind", "/queue",
+	"/sessions", "/resume",
 }
 
 // commandNames returns every "/"-command name available for tab
@@ -77,7 +77,7 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 	case "/think":
 		return m.handleThinkCommand(), nil
 	case "/new":
-		return m.handleNewCommand(), nil
+		return m.handleNewCommand()
 	case "/git":
 		return m.handleGitCommand(fields[1:]), nil
 	case "/compact":
@@ -91,7 +91,11 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 	case "/usage":
 		return m.handleUsageCommand(), nil
 	case "/rewind":
-		return m.handleRewindCommand(fields[1:]), nil
+		return m.handleRewindCommand(fields[1:])
+	case "/sessions":
+		return m.handleSessionsCommand(), nil
+	case "/resume":
+		return m.handleResumeCommand(fields[1:])
 	case "/queue":
 		return m.handleQueueCommand(fields[1:]), nil
 	case "/help":
@@ -130,14 +134,16 @@ const helpText = `commands:
   /model [name]         show available models, or switch to name
   /model check [name]   test a model through chisel's real request shape
   /think                toggle showing <think> blocks in full
-  /new                  start a fresh session (clears saved history)
+  /new                  start a fresh session (previous one stays saved — /sessions, /resume)
   /compact              summarize the conversation to save context
   /retry                re-send the last request after a failure
   /git auto [on|off]    toggle auto-commit after each turn
   /plan                 toggle plan mode (read-only exploration only)
   /status               show workdir, session, hooks, MCP, and memory info
-  /usage                show session token/request counts
+  /usage                show token/request counts since launch
   /rewind [n]           list checkpoints, or restore code+conversation to checkpoint n
+  /sessions             list every saved session for this directory
+  /resume [n]           list sessions, or switch this conversation to session n
   /queue [clear]        list messages queued while busy, or drop them all
 
 keys:
@@ -146,12 +152,15 @@ keys:
   @path                 reference a file — its content is sent to the model, tab to complete
   /command              tab-completes too — ambiguous prefixes list candidates
   !command              run a shell command directly, bypassing the model entirely — no permission prompt
-  up / down             recall previous input (single-line only)
+  up / down             recall previous input (single-line only, persists across restarts)
+  ctrl+r                incremental reverse search through input history
   ctrl+o                expand/collapse the most recent tool result
   ctrl+x                compose the current message in $EDITOR (falls back to vi)
   esc                   interrupt a running request/tool · deny a permission prompt
-  y / n / a             approve / deny / always-allow-this-session in a permission prompt
-  pgup/pgdn, ctrl+u/d   scroll the transcript
+  y / n / a / p         approve / deny / always-allow-this-session / always-allow-permanently (bash only) in a permission prompt
+  pgup/pgdn             scroll the transcript
+  ctrl+u/d              half-page scroll the transcript (outside the input box — ctrl+u/d edit text while composing)
+  mouse wheel           scroll the transcript · click+drag selects text and copies it on release
   ctrl+c                quit`
 
 func (m Model) handleHelpCommand() Model {
@@ -186,13 +195,19 @@ func (m Model) handleRetryCommand() (Model, tea.Cmd) {
 func (m Model) handleStatusCommand() Model {
 	m.appendLine(dimStyle.Render("workdir: " + m.workDir))
 
-	if path, err := session.Path(m.workDir); err == nil {
-		if info, err := os.Stat(path); err == nil {
-			m.appendLine(dimStyle.Render(fmt.Sprintf("session: %s (%d messages, saved %s)", path, len(m.messages), humanizeSince(info.ModTime()))))
-		} else {
-			m.appendLine(dimStyle.Render("session: not yet saved"))
+	// The raw session ID is a timestamp, not something a human recognizes
+	// at a glance — show the same friendly title /sessions already
+	// derives for it (deriveTitle, via session.List) instead.
+	title := m.sessionID
+	if metas, err := session.List(m.workDir); err == nil {
+		for _, meta := range metas {
+			if meta.ID == m.sessionID {
+				title = meta.Title
+				break
+			}
 		}
 	}
+	m.appendLine(dimStyle.Render(fmt.Sprintf("session: %q (%d messages) — /sessions lists every saved session for this directory", title, len(m.messages))))
 
 	if m.hooks.HasAny() {
 		m.appendLine(dimStyle.Render(fmt.Sprintf("hooks: %d preToolUse, %d postToolUse", len(m.hooks.Hooks.PreToolUse), len(m.hooks.Hooks.PostToolUse))))
@@ -237,9 +252,9 @@ func (m Model) handleStatusCommand() Model {
 	return m
 }
 
-// handleUsageCommand reports session-cumulative token and request
-// counts — deliberately not a dollar estimate against OpenCode Go's
-// hard usage caps ($12/5hr, $30/week, $60/month; see docs/design.md
+// handleUsageCommand reports cumulative token and request counts since
+// chisel launched — deliberately not a dollar estimate against OpenCode
+// Go's hard usage caps ($12/5hr, $30/week, $60/month; see docs/design.md
 // §4), even though that would be the more directly useful number.
 // Verified directly against the live API before building this: every
 // response's own "cost" field (a trailing SSE frame after [DONE]) reads
@@ -249,9 +264,16 @@ func (m Model) handleStatusCommand() Model {
 // with no reliable source for it would be worse than not claiming one
 // at all, the same reasoning chisel already applies to not maintaining
 // a per-model context-window table.
+//
+// Labeled "since launch," not "session": these counters are process-
+// lifetime and were never reset or reloaded across /new or /resume —
+// fine when process and session were the same thing, but /sessions and
+// /resume mean one process can now span several distinct saved
+// conversations, and "session usage" would misleadingly suggest this
+// only covers whichever one is currently active.
 func (m Model) handleUsageCommand() Model {
 	var b strings.Builder
-	b.WriteString("session usage:\n")
+	b.WriteString("usage since launch:\n")
 	fmt.Fprintf(&b, "  requests:    %d\n", m.requestCount)
 	fmt.Fprintf(&b, "  tokens in:   %s\n", formatTokenCount(m.tokensIn))
 	fmt.Fprintf(&b, "  tokens out:  %s\n", formatTokenCount(m.tokensOut))
@@ -292,31 +314,38 @@ func (m Model) handlePlanCommand() Model {
 	return m
 }
 
-// handleNewCommand abandons the current transcript, in memory and on
-// disk, and starts fresh. Doesn't touch which model is selected or the
-// bash session's cd/env state — those aren't part of "the conversation".
-// Also clears todos and checkpoints: both are tied to the conversation
-// just abandoned — a checkpoint's messageIndex in particular refers to a
+// handleNewCommand abandons the current transcript in memory and starts
+// a fresh session — a new session.NewID, not a deletion: the old
+// session's file is untouched on disk and still resumable via /sessions
+// + /resume. Doesn't touch which model is selected or the bash session's
+// cd/env state — those aren't part of "the conversation". Also clears
+// todos and checkpoints: both are tied to the conversation just
+// abandoned — a checkpoint's messageIndex in particular refers to a
 // position in the now-gone m.messages, and leaving it behind meant a
 // later /rewind could slice m.messages past its new, shorter length and
-// panic. The clear error (if any) is appended *after* the reset, not
-// before — appending first and then wiping m.entries would erase it
-// before it was ever actually shown.
-func (m Model) handleNewCommand() Model {
-	clearErr := session.Clear(m.workDir)
+// panic. Same reasoning for lastToolResultIdx (ctrl+o could otherwise
+// expand an entry from the old conversation) and the doom-loop counters
+// (a repeat count from the abandoned conversation shouldn't carry into
+// this one). Saves immediately, with zero messages, rather than waiting
+// for the next turn to complete — otherwise quitting right after /new
+// resumed the *old* session next launch, since nothing durable recorded
+// that a new one had started (session.List/LoadByID treat a zero-message
+// session as real specifically so this save means something).
+func (m Model) handleNewCommand() (Model, tea.Cmd) {
+	m.sessionID = session.NewID()
 	m.messages = nil
 	m.entries = nil
 	m.lastContextTokens = 0
 	m.todos = nil
 	m.checkpoints = nil
 	m.pendingRewind = nil
+	m.lastToolResultIdx = -1
+	m.lastToolCallKey = ""
+	m.toolCallRepeatCount = 0
 	m.viewport.SetContent("")
 	m.recomputeViewportHeight()
-	m.appendLine(dimStyle.Render("started a new session"))
-	if clearErr != nil {
-		m.appendLine(errorStyle.Render("failed to clear saved session: " + clearErr.Error()))
-	}
-	return m
+	m.appendLine(dimStyle.Render("started a new session — the previous one is still saved; /sessions lists it, /resume <n> switches back"))
+	return m, saveSession(m.workDir, m.sessionID, m.messages)
 }
 
 // handleQueueCommand implements /queue [clear] — messages typed while
@@ -448,10 +477,10 @@ func (m Model) handleModelCheckResult(msg modelCheckResultMsg) (tea.Model, tea.C
 	m.state = stateInput
 	if msg.err != nil {
 		m.appendLine(errorStyle.Render(fmt.Sprintf("✗ %s: %s", msg.model, interruptibleErrorText(msg.err))))
-		return m, nil
+		return m, m.turnSettledCmd()
 	}
 	m.appendLine(dimStyle.Render(fmt.Sprintf("✓ %s: %s", msg.model, firstLine(msg.reply))))
-	return m, nil
+	return m, m.turnSettledCmd()
 }
 
 // handleCompactCommand asks the model to summarize the conversation so
@@ -477,7 +506,7 @@ func (m Model) handleCompactResult(msg compactResultMsg) (tea.Model, tea.Cmd) {
 
 	if msg.err != nil {
 		m.appendLine(errorStyle.Render("compact failed: " + interruptibleErrorText(msg.err)))
-		return m, nil
+		return m, m.turnSettledCmd()
 	}
 
 	m.messages = compactedHistory(msg.summary)
@@ -492,5 +521,6 @@ func (m Model) handleCompactResult(msg compactResultMsg) (tea.Model, tea.Cmd) {
 	m.appendLine(dimStyle.Render("── conversation compacted ──"))
 	m.appendAssistantEntry(msg.summary)
 
-	return m, saveSession(m.workDir, m.messages)
+	save := saveSession(m.workDir, m.sessionID, m.messages)
+	return m, tea.Batch(save, m.turnSettledCmd())
 }

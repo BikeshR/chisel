@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -127,6 +128,23 @@ func run(ctx context.Context, workDir string, h Hook, toolName, argsJSON, path s
 		"CHISEL_HOOK_ARGS="+argsJSON,
 		"CHISEL_HOOK_PATH="+path,
 	)
+	// Without Setpgid + a Cancel override, context expiry only kills the
+	// immediate sh process — a hook whose own foreground command runs
+	// long after itself backgrounding a child (`sleep 300 &`, a daemon,
+	// anything detached) left the whole group running well past the
+	// timeout. Same pattern bash_background and BashSession already use
+	// for exactly this reason: kill -pid, not just the tracked process.
+	// WaitDelay covers the other shape — a hook that backgrounds a child
+	// and returns immediately itself, so sh exits before the context
+	// ever expires and there's no live process left for Cancel to act
+	// on, but the orphaned child still holds the output pipe open;
+	// WaitDelay bounds how long CombinedOutput waits on that pipe
+	// regardless of whether Cancel ever fired.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 2 * time.Second
 
 	out, runErr := cmd.CombinedOutput()
 	output = string(out)

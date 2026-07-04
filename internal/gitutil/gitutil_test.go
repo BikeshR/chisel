@@ -27,12 +27,95 @@ func initRepo(t *testing.T) string {
 	return dir
 }
 
+// initRepoNoIdentity creates a real git repo with no user.name/user.email
+// configured anywhere reachable — local config is left unset, and HOME
+// (where git looks for ~/.gitconfig) is pointed at a fresh temp dir with
+// system config disabled too, so the test can't accidentally inherit
+// the actual machine's global git identity and mask what it's testing.
+func initRepoNoIdentity(t *testing.T) string {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+
+	cmd := exec.Command("git", "init")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	return dir
+}
+
 func TestIsRepo(t *testing.T) {
 	if !IsRepo(initRepo(t)) {
 		t.Error("IsRepo = false for a real git repo")
 	}
 	if IsRepo(t.TempDir()) {
 		t.Error("IsRepo = true for a plain directory")
+	}
+}
+
+// commit makes an initial commit in dir so HEAD resolves to a real
+// branch — a freshly git-init'd repo has no commits yet, and HEAD is
+// "unborn" until the first one.
+func commit(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-m", "initial"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+}
+
+func TestBranchReturnsCurrentBranchName(t *testing.T) {
+	dir := initRepo(t)
+	commit(t, dir)
+
+	name, ok := Branch(dir)
+	if !ok {
+		t.Fatal("Branch: ok = false for a repo with a real commit")
+	}
+	if name == "" || name == "HEAD" {
+		t.Errorf("Branch = %q, want a real branch name", name)
+	}
+}
+
+func TestBranchFalseForUnbornHEAD(t *testing.T) {
+	dir := initRepo(t) // no commit yet — HEAD is unborn
+	if _, ok := Branch(dir); ok {
+		t.Error("Branch: ok = true for a repo with no commits yet (unborn HEAD)")
+	}
+}
+
+func TestBranchFalseForNonRepo(t *testing.T) {
+	if _, ok := Branch(t.TempDir()); ok {
+		t.Error("Branch: ok = true for a plain directory")
+	}
+}
+
+func TestBranchFalseForDetachedHEAD(t *testing.T) {
+	dir := initRepo(t)
+	commit(t, dir)
+
+	rev := exec.Command("git", "rev-parse", "HEAD")
+	rev.Dir = dir
+	out, err := rev.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := exec.Command("git", "checkout", strings.TrimSpace(string(out)))
+	checkout.Dir = dir
+	if out, err := checkout.CombinedOutput(); err != nil {
+		t.Fatalf("git checkout: %v: %s", err, out)
+	}
+
+	if _, ok := Branch(dir); ok {
+		t.Error("Branch: ok = true for a detached HEAD")
 	}
 }
 
@@ -150,6 +233,52 @@ func TestCommitNewlyChanged(t *testing.T) {
 	}
 	if got := string(out); got != "chisel: add a.txt\n" {
 		t.Errorf("commit message = %q, want %q", got, "chisel: add a.txt\n")
+	}
+}
+
+func TestCommitNewlyChangedWithNoGitIdentityConfigured(t *testing.T) {
+	dir := initRepoNoIdentity(t)
+	before, err := DirtyPaths(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sha, err := CommitNewlyChanged(dir, before, "should succeed via the fallback identity")
+	if err != nil {
+		t.Fatalf("CommitNewlyChanged with no git identity configured: %v, want it to succeed via a fallback", err)
+	}
+	if sha == "" {
+		t.Error("expected a non-empty commit sha")
+	}
+}
+
+func TestCommitNewlyChangedNeverOverridesExistingIdentity(t *testing.T) {
+	dir := initRepo(t) // sets user.name/user.email locally to chisel-test
+	before, err := DirtyPaths(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CommitNewlyChanged(dir, before, "should use the repo's own identity"); err != nil {
+		t.Fatalf("CommitNewlyChanged: %v", err)
+	}
+
+	log := exec.Command("git", "log", "-1", "--format=%an <%ae>")
+	log.Dir = dir
+	out, err := log.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.TrimSpace(string(out))
+	want := "chisel-test <chisel-test@example.com>"
+	if got != want {
+		t.Errorf("commit author = %q, want %q — an already-configured identity must never be replaced by the fallback", got, want)
 	}
 }
 

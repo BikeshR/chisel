@@ -75,6 +75,34 @@ func (r *RuleList) UnmarshalJSON(data []byte) error {
 	return err
 }
 
+// MarshalJSON writes r back to the same "pattern": "decision" object
+// shape UnmarshalJSON reads — needed because RuleList's default
+// (struct-array) marshaling wouldn't round-trip through Load, which
+// expects each tool's value to be an object mapping pattern to a plain
+// decision string, not an array of {Pattern,Decision} objects.
+func (r RuleList) MarshalJSON() ([]byte, error) {
+	var b bytes.Buffer
+	b.WriteByte('{')
+	for i, rule := range r {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		key, err := json.Marshal(rule.Pattern)
+		if err != nil {
+			return nil, err
+		}
+		b.Write(key)
+		b.WriteByte(':')
+		val, err := json.Marshal(string(rule.Decision))
+		if err != nil {
+			return nil, err
+		}
+		b.Write(val)
+	}
+	b.WriteByte('}')
+	return b.Bytes(), nil
+}
+
 // Config maps a tool name to its rules.
 type Config map[string]RuleList
 
@@ -106,6 +134,35 @@ func Load(workDir string) (cfg Config, found bool, err error) {
 		return nil, true, err
 	}
 	return cfg, true, nil
+}
+
+// Add appends a new rule for toolName (pattern → decision) to cfg,
+// returning the updated Config — cfg may be nil (no permissions.json
+// existed yet, or none was configured). Doesn't write anything to disk;
+// call Save with the result. Order matters (see RuleList's own doc
+// comment on last-match-wins), so this always appends rather than
+// inserting — a newly added rule is meant to be the most specific,
+// most-recently-decided one for its pattern.
+func Add(cfg Config, toolName, pattern string, decision Decision) Config {
+	if cfg == nil {
+		cfg = Config{}
+	}
+	cfg[toolName] = append(cfg[toolName], Rule{Pattern: pattern, Decision: decision})
+	return cfg
+}
+
+// Save writes cfg to workDir's permissions.json, creating the .chisel
+// directory if it doesn't exist yet.
+func Save(workDir string, cfg Config) error {
+	path := ConfigPath(workDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
 }
 
 // Match returns the decision for toolName given argText — the text

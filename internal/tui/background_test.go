@@ -144,6 +144,22 @@ func TestHandleBackgroundTaskDoneAppendsMessageAndMarksNotRunning(t *testing.T) 
 	if !strings.Contains(got.messages[0].Content, "npm run build") || !strings.Contains(got.messages[0].Content, "build succeeded") {
 		t.Errorf("message content = %q", got.messages[0].Content)
 	}
+
+	// A background command (a build, a script) can change git state —
+	// the cached status-bar segment must be refreshed here too, not just
+	// once the model's own turn ends.
+	foundGitStatus := false
+	for _, sub := range unpackBatch(t, cmd) {
+		if sub == nil {
+			continue
+		}
+		if _, ok := sub().(gitStatusMsg); ok {
+			foundGitStatus = true
+		}
+	}
+	if !foundGitStatus {
+		t.Error("expected refreshGitStatus's Cmd among handleBackgroundTaskDone's batch")
+	}
 }
 
 func TestHandleBackgroundTaskDoneReportsFailure(t *testing.T) {
@@ -153,6 +169,102 @@ func TestHandleBackgroundTaskDoneReportsFailure(t *testing.T) {
 	got, _ := m.handleBackgroundTaskDone(backgroundTaskDoneMsg{id: "bg_1", output: "oops", err: errTestFailure{}})
 	if !strings.Contains(got.messages[0].Content, "failed") {
 		t.Errorf("message content = %q, want it to mention failure", got.messages[0].Content)
+	}
+}
+
+// TestHandleBackgroundTaskDoneBuffersMidTurn is the regression test for
+// a real corruption bug: appending the synthetic message straight to
+// m.messages regardless of state risked landing it between an
+// assistant's tool_calls and their own results if the completion fired
+// mid-turn — a shape every OpenAI-compatible endpoint rejects, and
+// which then got saved to disk, corrupting session resume too.
+func TestHandleBackgroundTaskDoneBuffersMidTurn(t *testing.T) {
+	m := Model{workDir: t.TempDir(), state: stateExecutingTool, pendingUses: []agent.ToolCall{{ID: "call_1"}}}
+	m = m.handleBackgroundTaskStarted(backgroundTaskStartedMsg{id: "bg_1", command: "npm run build", cancel: func() {}})
+
+	got, _ := m.handleBackgroundTaskDone(backgroundTaskDoneMsg{id: "bg_1", output: "build succeeded\n"})
+
+	if len(got.messages) != 0 {
+		t.Errorf("messages = %+v, want nothing appended yet — a turn is still in flight", got.messages)
+	}
+	if len(got.pendingBackgroundResults) != 1 {
+		t.Fatalf("pendingBackgroundResults = %+v, want the completion buffered", got.pendingBackgroundResults)
+	}
+	if !strings.Contains(got.pendingBackgroundResults[0].Content, "build succeeded") {
+		t.Errorf("buffered content = %q", got.pendingBackgroundResults[0].Content)
+	}
+
+	// The transcript line and notification are pure UI — must still
+	// happen immediately, even though the message append is deferred.
+	found := false
+	for _, l := range got.renderedLines() {
+		if strings.Contains(l, "npm run build") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected the transcript line to appear immediately regardless of turn state")
+	}
+}
+
+// TestHandleBackgroundTaskDoneBuffersDuringDenialReasonWindow is the
+// regression test for a bug in the very buffering pass 3 introduced to
+// fix this class of corruption: pressing "n" at a permission prompt sets
+// m.state back to stateInput (see handleKey's stateAwaitingPermission
+// "n" case) while m.pendingUses is still unresolved, so a background
+// task finishing in that window used to slip past the state-only check
+// and append directly — landing its synthetic message between the
+// assistant's dangling tool_calls and their eventual results, once the
+// denial reason is submitted.
+func TestHandleBackgroundTaskDoneBuffersDuringDenialReasonWindow(t *testing.T) {
+	m := Model{
+		workDir:              t.TempDir(),
+		state:                stateInput,
+		awaitingDenialReason: true,
+		pendingUses:          []agent.ToolCall{{ID: "call_1"}},
+	}
+	m = m.handleBackgroundTaskStarted(backgroundTaskStartedMsg{id: "bg_1", command: "npm run build", cancel: func() {}})
+
+	got, _ := m.handleBackgroundTaskDone(backgroundTaskDoneMsg{id: "bg_1", output: "build succeeded\n"})
+
+	if len(got.messages) != 0 {
+		t.Errorf("messages = %+v, want nothing appended yet — a denial reason is still pending", got.messages)
+	}
+	if len(got.pendingBackgroundResults) != 1 {
+		t.Fatalf("pendingBackgroundResults = %+v, want the completion buffered", got.pendingBackgroundResults)
+	}
+}
+
+// TestMergeBufferedBackgroundResultsFoldsInAtTurnBoundary confirms the
+// other half: once the turn actually settles (dequeueOrSubmit's own
+// chokepoint), the buffered message is folded into m.messages in the
+// correct position — after everything from the turn that was in flight
+// when it completed, never interleaved into it.
+func TestMergeBufferedBackgroundResultsFoldsInAtTurnBoundary(t *testing.T) {
+	m := Model{
+		workDir:  t.TempDir(),
+		messages: []agent.Message{{Role: "user", Content: "do a thing"}, {Role: "assistant", Content: "done"}},
+		pendingBackgroundResults: []agent.Message{
+			{Role: "user", Content: "[background task bg_1 finished]"},
+		},
+	}
+	m.mergeBufferedBackgroundResults()
+
+	if len(m.messages) != 3 {
+		t.Fatalf("messages = %+v, want 3 (the buffered one appended last)", m.messages)
+	}
+	if m.messages[2].Content != "[background task bg_1 finished]" {
+		t.Errorf("messages[2] = %+v, want the buffered background message", m.messages[2])
+	}
+	if len(m.pendingBackgroundResults) != 0 {
+		t.Error("expected pendingBackgroundResults cleared after merging")
+	}
+}
+
+func TestFlushPendingBackgroundResultsNilWhenEmpty(t *testing.T) {
+	m := Model{workDir: t.TempDir()}
+	if cmd := m.flushPendingBackgroundResults(); cmd != nil {
+		t.Error("expected a nil Cmd when nothing is buffered")
 	}
 }
 

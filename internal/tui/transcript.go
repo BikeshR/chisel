@@ -186,7 +186,14 @@ func (m Model) renderedLines() []string {
 
 // refreshViewport rebuilds the viewport's content from the current
 // entries. Call after appending, after /think toggles, or after a resize
-// changes m.width.
+// changes m.width. Also re-applies the in-progress mouse selection
+// highlight (see selection.go) if one is active — folding this in here,
+// rather than only where the selection itself changes, means a stream
+// delta arriving mid-drag doesn't silently drop the highlight.
 func (m *Model) refreshViewport() {
-	m.viewport.SetContent(m.transcriptContent())
+	content := m.transcriptContent()
+	if m.selecting {
+		content = applySelectionHighlight(content, m.selStartLine, m.selStartCol, m.selEndLine, m.selEndCol)
+	}
+	m.viewport.SetContent(content)
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/BikeshR/chisel/internal/checkpoint"
 	"github.com/BikeshR/chisel/internal/customcmd"
 	"github.com/BikeshR/chisel/internal/gitutil"
+	"github.com/BikeshR/chisel/internal/history"
 	"github.com/BikeshR/chisel/internal/hooks"
 	"github.com/BikeshR/chisel/internal/mcp"
 	"github.com/BikeshR/chisel/internal/permrules"
@@ -46,11 +47,17 @@ const (
 // enough UI state to render the transcript, a spinner, and a permission
 // prompt.
 type Model struct {
-	client    *agent.Client
-	workDir   string
-	bash      *agent.BashSession
-	mcp       *mcp.Registry
-	hooks     hooks.Config
+	client  *agent.Client
+	workDir string
+	bash    *agent.BashSession
+	mcp     *mcp.Registry
+	hooks   hooks.Config
+	// sessionID is which of workDir's (possibly several) saved sessions
+	// this conversation saves back to — see internal/session. Set once
+	// at startup (the resumed session's own ID, or a freshly minted one),
+	// changed by /new (a new ID, abandoning the old one rather than
+	// deleting it) and /resume (switching to a past session's own ID).
+	sessionID string
 	permRules permrules.Config
 	// memUser/memProject record which CHISEL.md files were found at
 	// startup (see New) — kept only for /status to report later; the
@@ -125,6 +132,16 @@ type Model struct {
 	inputHistory []string
 	historyIdx   int
 	historyDraft string
+	// reverseSearchActive is true while ctrl+r's incremental reverse
+	// search is active — a sub-mode layered on top of stateInput (the
+	// same pattern awaitingDenialReason already uses) rather than a new
+	// top-level state, since it's purely about how the textarea's
+	// content gets composed, not the agent loop. reverseSearchQuery is
+	// what's been typed so far; reverseSearchMatchIdx is the inputHistory
+	// index of the current match, or -1 if the query matches nothing.
+	reverseSearchActive   bool
+	reverseSearchQuery    string
+	reverseSearchMatchIdx int
 
 	// todos is the model's current task checklist, replaced wholesale
 	// on every successful update_todos call (see parseTodos in todo.go)
@@ -150,11 +167,39 @@ type Model struct {
 	// only by CancelBackgroundTasks (chisel exiting) or the command
 	// finishing on its own.
 	backgroundTasks map[string]*backgroundTask
+	// pendingBackgroundResults holds a finished background task's
+	// synthetic message when it completes *mid-turn* — appending it to
+	// m.messages immediately would risk landing it between an
+	// assistant's tool_calls and their own results (whichever provider
+	// rejects that shape), if the timing is unlucky. Held here instead
+	// and merged in once the current turn is fully resolved — see
+	// mergeBufferedBackgroundResults, called from every chokepoint that
+	// already means "the turn just settled" (dequeueOrSubmit's callers).
+	pendingBackgroundResults []agent.Message
 
 	// lastToolResultIdx is the entries index of the most recently
 	// appended tool-result entry, or -1 if none yet — ctrl+o
 	// (toggleLastToolResult) expands/collapses that one entry.
 	lastToolResultIdx int
+
+	// selecting is true while a left-button mouse drag is selecting text
+	// over the transcript viewport — see handleMouseMsg (selection.go).
+	// selStart*/selEnd* mark its current extent as (line, col) pairs,
+	// line indexing into the full wrapped transcript content, not just
+	// what's currently scrolled into view.
+	selecting                 bool
+	selStartLine, selStartCol int
+	selEndLine, selEndCol     int
+	// pendingClipboardOSC is a raw OSC-52 clipboard-set escape sequence
+	// queued to go out with the very next rendered frame (see View) —
+	// cleared by clearClipboardOSCMsg once it's had that one render cycle.
+	pendingClipboardOSC string
+	// pendingNotifyOSC is a raw bell+OSC-9 desktop-notification escape
+	// sequence, queued and rendered the same way pendingClipboardOSC is
+	// (see notifyIdle) rather than written to os.Stdout directly from a
+	// Cmd goroutine — the exact race the OSC-52 code above documents
+	// avoiding. Cleared by clearNotifyOSCMsg after one render cycle.
+	pendingNotifyOSC string
 
 	// streamLineIdx is the index into entries of the assistant line
 	// currently being built from streamed text deltas, or -1 if none is
@@ -168,6 +213,16 @@ type Model struct {
 	// during it — never whatever the user already had unstaged before
 	// chisel touched anything.
 	preTurnDirty map[string]bool
+
+	// gitIsRepo/gitBranch/gitDirty cache the status bar's branch/dirty
+	// segment — refreshed once at startup and once per completed turn
+	// (see refreshGitStatus), not on every render: git rev-parse/status
+	// are subprocess calls, and View() runs many times a second while
+	// streaming, so shelling out on every render would be wasteful for a
+	// value that only changes at the pace of actual file edits.
+	gitIsRepo bool
+	gitBranch string
+	gitDirty  bool
 
 	// turnStartedAt marks when the current busy state (stateWaitingModel or
 	// stateExecutingTool) began — see startBusy — so the spinner line can
@@ -252,8 +307,11 @@ func interruptibleErrorText(err error) string {
 // bash and mcpRegistry are owned by the caller (main.go), not created
 // here, so their lifecycle (closing the shell / MCP server processes on
 // exit) doesn't depend on anything inside this package. resumed and
-// savedAt come from session.Load — pass a nil/zero pair if there's
-// nothing to resume. hooksCfg comes from hooks.LoadConfig — a zero value
+// savedAt come from session.LoadLatest — pass a nil/zero pair if there's
+// nothing to resume. sessionID is whichever session future saves go to
+// — LoadLatest's own resumed ID, or a freshly minted session.NewID() if
+// there was nothing to resume — since a session can't be saved back to
+// without one. hooksCfg comes from hooks.LoadConfig — a zero value
 // is fine and just means no hooks configured. memUser/memProject report
 // which CHISEL.md files memory.Load found, just to show a startup line —
 // the content itself was already handed to the client via SetMemory.
@@ -267,7 +325,12 @@ func interruptibleErrorText(err error) string {
 // the system prompt and the tool's actual lookup stay in sync. permRules
 // comes from permrules.Load — a nil/empty Config is fine and just means
 // no persistent rules are configured, same as an absent hooks.json.
-func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, customCommands map[string]customcmd.Command, checkpointStore *checkpoint.Store, skills map[string]skill.Skill, permRules permrules.Config, resumed []agent.Message, savedAt time.Time) Model {
+// sessionLoadFailed comes from session.LoadLatest's own corrupt return
+// value — true only when a previous session file existed but couldn't
+// be read or parsed, as opposed to there simply being no prior session
+// yet; it drives a one-line warning so a corrupt session doesn't just
+// silently vanish with no indication anything went wrong.
+func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, customCommands map[string]customcmd.Command, checkpointStore *checkpoint.Store, skills map[string]skill.Skill, permRules permrules.Config, resumed []agent.Message, savedAt time.Time, sessionLoadFailed bool, sessionID string) Model {
 	ta := textarea.New()
 	ta.Placeholder = "ask chisel to do something… (alt+enter for a new line, @path to reference a file, !cmd to run a shell command directly, /help for commands)"
 	ta.Focus()
@@ -288,6 +351,7 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 	m := Model{
 		client:            client,
 		workDir:           workDir,
+		sessionID:         sessionID,
 		bash:              bash,
 		mcp:               mcpRegistry,
 		hooks:             hooksCfg,
@@ -305,10 +369,15 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 		streamLineIdx:     -1,
 		historyIdx:        -1,
 		lastToolResultIdx: -1,
+		inputHistory:      history.Load(),
 	}
 
 	if memUser || memProject {
 		m.entries = append(m.entries, entry{styled: dimStyle.Render("loaded " + memoryBannerText(memUser, memProject))})
+	}
+
+	if sessionLoadFailed {
+		m.entries = append(m.entries, entry{styled: errorStyle.Render("the saved session for this directory couldn't be read — starting fresh; the old file is left untouched in ~/.chisel/sessions")})
 	}
 
 	if len(resumed) > 0 {
@@ -342,7 +411,32 @@ func memoryBannerText(memUser, memProject bool) string {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, m.spinner.Tick)
+	return tea.Batch(textarea.Blink, m.spinner.Tick, refreshGitStatus(m.workDir))
+}
+
+// gitStatusMsg carries a refreshed git branch/dirty snapshot for the
+// status bar — see refreshGitStatus and Model.gitIsRepo/gitBranch/gitDirty.
+type gitStatusMsg struct {
+	isRepo bool
+	branch string
+	dirty  bool
+}
+
+// refreshGitStatus shells out to git (rev-parse + status --porcelain)
+// once, off the render path — called at startup and after each
+// completed turn (see handleStreamComplete), not on every View(), since
+// that runs many times a second while streaming and a value that only
+// changes at the pace of actual file edits doesn't need refreshing that
+// often.
+func refreshGitStatus(workDir string) tea.Cmd {
+	return func() tea.Msg {
+		if !gitutil.IsRepo(workDir) {
+			return gitStatusMsg{}
+		}
+		branch, _ := gitutil.Branch(workDir)
+		dirty, _ := gitutil.DirtyPaths(workDir)
+		return gitStatusMsg{isRepo: true, branch: branch, dirty: len(dirty) > 0}
+	}
 }
 
 func (m *Model) appendLine(s string) {
@@ -524,7 +618,13 @@ func executeTool(ctx context.Context, workDir, model string, bash *agent.BashSes
 			if err != nil {
 				result = agent.ToolResult{ID: call.ID, Content: err.Error(), IsError: true}
 			} else {
-				result = agent.ToolResult{ID: call.ID, Content: content, IsError: isError}
+				// agent.Execute already caps every built-in tool's own
+				// output (agent.TruncateOutput) precisely because
+				// oversized content gets resent on every subsequent
+				// request until /compact — an MCP result (a large gopls
+				// go_search/go_package_api response, for instance) went
+				// through uncapped, bypassing that entirely.
+				result = agent.ToolResult{ID: call.ID, Content: agent.TruncateOutput(content), IsError: isError}
 			}
 		} else {
 			result = agent.Execute(ctx, workDir, model, call, bash, skills)
@@ -536,9 +636,22 @@ func executeTool(ctx context.Context, workDir, model string, bash *agent.BashSes
 			} else if out != "" {
 				result.Content += "\n\n[hook] " + out
 			}
+			// Re-cap after appending hook output — result.Content was
+			// already within bounds on its own, but a large postToolUse
+			// hook's own output (a verbose linter, for instance) could
+			// push the combined string back over the same limit.
+			result.Content = agent.TruncateOutput(result.Content)
 		}
 
-		return toolResultMsg{result: result}
+		// ctx.Err() directly, not string-matching result.Content against
+		// context.Canceled.Error() — the latter already broke for a
+		// wrapped MCP error (see interruptibleResultText), and this is
+		// the one place that still has the real ctx, not just its
+		// stringified fallout. See handleToolResult's interrupted
+		// handling for why this matters beyond just the displayed text:
+		// esc during a tool call needs to stop the whole turn, not just
+		// the one call in flight.
+		return toolResultMsg{result: result, interrupted: ctx.Err() != nil}
 	}
 }
 
@@ -565,13 +678,13 @@ func summarizeCall(call agent.ToolCall) string {
 	return agent.Summarize(call)
 }
 
-// saveSession persists messages as the current session for workDir. A
-// failure here isn't fatal to the conversation itself, so it's reported
-// as a sessionSaveErrorMsg rather than surfaced through the normal
+// saveSession persists messages as session id for workDir. A failure
+// here isn't fatal to the conversation itself, so it's reported as a
+// sessionSaveErrorMsg rather than surfaced through the normal
 // error-handling path.
-func saveSession(workDir string, messages []agent.Message) tea.Cmd {
+func saveSession(workDir, id string, messages []agent.Message) tea.Cmd {
 	return func() tea.Msg {
-		if err := session.Save(workDir, messages); err != nil {
+		if err := session.Save(workDir, id, messages); err != nil {
 			return sessionSaveErrorMsg{err: err}
 		}
 		return nil

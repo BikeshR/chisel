@@ -151,6 +151,30 @@ func allowlistKey(call agent.ToolCall) (key string, ok bool) {
 	}
 }
 
+// persistableRuleFor returns the tool name and glob pattern
+// permrules.Add would use to permanently allow call going forward (see
+// the "p" prompt option in update.go), and whether call is eligible at
+// all. Deliberately matches exactly what matchPermissionRules above
+// already supports — bash/bash_background command text — since a
+// persistent rule for anything else (a file edit's path, an MCP tool by
+// name) has no natural single string to write a shell-style glob
+// against, the same reasoning permrules.Match's own tool switch is
+// restricted to those two.
+func persistableRuleFor(call agent.ToolCall) (toolName, pattern string, ok bool) {
+	switch call.Function.Name {
+	case "bash", "bash_background":
+		var in struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &in); err != nil || in.Command == "" {
+			return "", "", false
+		}
+		return call.Function.Name, in.Command, true
+	default:
+		return "", "", false
+	}
+}
+
 // mcpCallArgsPreview renders a truncated, pretty-printed preview of an
 // MCP tool call's arguments for the permission prompt. Without this the
 // prompt showed only "server: tool" with zero argument visibility —

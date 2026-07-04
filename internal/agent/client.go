@@ -124,8 +124,21 @@ func (c *Client) SetTools(tools []Tool) {
 // mcp__<server>__<tool>): there's no point continuing to offer the
 // model a tool that will just fail every time, with no way back short
 // of restarting chisel entirely.
+//
+// Allocates a fresh slice rather than compacting into c.tools[:0] —
+// Clone/WithoutTools do a shallow struct copy, so a clone's own tools
+// field shares this same backing array at the moment it's made.
+// Compacting in place would silently overwrite whatever elements a
+// clone's slice still (logically) contains within its own length,
+// even though nothing ever assigns to clone.tools directly. Nothing
+// races on this concurrently today — the state machine sequences a new
+// turn (the only caller of syncMCPHealth, which calls this) after
+// whatever probe client /model check cloned has already finished using
+// its own tools — but it's exactly the kind of latent aliasing a later
+// change (a background MCP health check, say) would trip over first
+// and hardest to diagnose.
 func (c *Client) RemoveToolsWithPrefix(prefix string) {
-	kept := c.tools[:0]
+	kept := make([]Tool, 0, len(c.tools))
 	for _, t := range c.tools {
 		if !strings.HasPrefix(t.Function.Name, prefix) {
 			kept = append(kept, t)
@@ -242,28 +255,96 @@ func (c *Client) SendStreaming(ctx context.Context, history []Message) (<-chan E
 		return nil, fmt.Errorf("encode request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+	resp, err := c.doWithRetry(ctx, body)
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("authorization", "Bearer "+c.apiKey)
-	req.Header.Set("accept", "text/event-stream")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		defer func() { _ = resp.Body.Close() }()
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return nil, fmt.Errorf("%s %s: %d %s", req.Method, req.URL.Path, resp.StatusCode, describeError(data))
 	}
 
 	ch := make(chan Event)
 	go decodeStream(resp.Body, ch)
 	return ch, nil
+}
+
+// maxSendAttempts bounds how many times doWithRetry will try a request
+// that failed for a plausibly transient reason — a dropped connection,
+// or the provider returning 429/500/502/503/504 — before giving up.
+// Anything else (a 400, a 401, any other 4xx) is returned immediately:
+// retrying a request the client got wrong would just repeat the same
+// failure, not recover from it.
+const maxSendAttempts = 3
+
+// retryBackoffFunc returns how long to wait before retrying, given how
+// many attempts have already failed (0 for the first retry). Exponential
+// starting at 1s, capped at 10s so maxSendAttempts' worth of retries
+// finishes in well under a minute even in the worst case. A var (not a
+// plain function), the same reasoning as sseReadIdleTimeout: tests
+// shrink it so retry tests don't spend real seconds sleeping.
+var retryBackoffFunc = func(failedAttempts int) time.Duration {
+	d := time.Second << failedAttempts
+	if d > 10*time.Second {
+		d = 10 * time.Second
+	}
+	return d
+}
+
+// isRetryableStatus reports whether an HTTP status code is worth
+// retrying — a rate limit or a server-side hiccup, not a request the
+// client itself got wrong.
+func isRetryableStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests, http.StatusInternalServerError,
+		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+// doWithRetry sends the request built from body, retrying transient
+// failures up to maxSendAttempts times with backoff between attempts.
+// body is re-read fresh (via bytes.NewReader) on every attempt — a
+// *http.Request's body can't be replayed once consumed, so this builds
+// a new request each time rather than reusing one across retries. On
+// success, the caller owns the returned response's body and must close
+// it (same contract SendStreaming always had); on failure, every
+// attempt's body is drained and closed here before returning.
+func (c *Client) doWithRetry(ctx context.Context, body []byte) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt < maxSendAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(retryBackoffFunc(attempt - 1)):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("content-type", "application/json")
+		req.Header.Set("authorization", "Bearer "+c.apiKey)
+		req.Header.Set("accept", "text/event-stream")
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("request failed: %w", err)
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			return resp, nil
+		}
+
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		_ = resp.Body.Close()
+		statusErr := fmt.Errorf("%s %s: %d %s", req.Method, req.URL.Path, resp.StatusCode, describeError(data))
+		if !isRetryableStatus(resp.StatusCode) {
+			return nil, statusErr
+		}
+		lastErr = statusErr
+	}
+	return nil, fmt.Errorf("failed after %d attempts: %w", maxSendAttempts, lastErr)
 }
 
 func describeError(body []byte) string {

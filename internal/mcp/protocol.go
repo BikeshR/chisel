@@ -60,6 +60,10 @@ type Tool struct {
 
 type toolsListResult struct {
 	Tools []Tool `json:"tools"`
+	// NextCursor is set when the server has more tools than fit in one
+	// response — listTools (server.go) passes it back as the next
+	// request's cursor param until this is empty.
+	NextCursor string `json:"nextCursor,omitempty"`
 }
 
 type toolsCallParams struct {

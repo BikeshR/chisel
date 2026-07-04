@@ -70,18 +70,18 @@ func (m Model) handleCheckpointCreated(msg checkpointCreatedMsg) Model {
 // conversation mid-turn (pending tool calls, an in-flight stream) has
 // no sane meaning, so it's simplest to just require the turn be over
 // or interrupted first.
-func (m Model) handleRewindCommand(args []string) Model {
+func (m Model) handleRewindCommand(args []string) (Model, tea.Cmd) {
 	if m.checkpointStore == nil {
 		m.appendLine(errorStyle.Render("checkpoints aren't available for this session"))
-		return m
+		return m, nil
 	}
 	if m.state != stateInput {
 		m.appendLine(errorStyle.Render("can't rewind while a turn is in progress — press esc first"))
-		return m
+		return m, nil
 	}
 
 	if len(args) == 0 {
-		return m.listCheckpoints()
+		return m.listCheckpoints(), nil
 	}
 	if args[0] == "confirm" {
 		return m.confirmRewind()
@@ -91,7 +91,7 @@ func (m Model) handleRewindCommand(args []string) Model {
 	if err != nil || n < 1 || n > len(m.checkpoints) {
 		m.appendLine(errorStyle.Render(fmt.Sprintf(
 			"usage: /rewind <n> — %d checkpoint(s) available; /rewind alone lists them", len(m.checkpoints))))
-		return m
+		return m, nil
 	}
 
 	target := m.checkpoints[len(m.checkpoints)-n]
@@ -100,7 +100,7 @@ func (m Model) handleRewindCommand(args []string) Model {
 	m.appendLine(dimStyle.Render(fmt.Sprintf(
 		"this will discard file changes since %q and remove %d message(s) from the conversation.", target.label, discarded)))
 	m.appendLine(dimStyle.Render("type /rewind confirm to proceed, or anything else to cancel"))
-	return m
+	return m, nil
 }
 
 func (m Model) listCheckpoints() Model {
@@ -121,17 +121,17 @@ func (m Model) listCheckpoints() Model {
 	return m
 }
 
-func (m Model) confirmRewind() Model {
+func (m Model) confirmRewind() (Model, tea.Cmd) {
 	if m.pendingRewind == nil {
 		m.appendLine(errorStyle.Render("nothing to confirm — use /rewind <n> first"))
-		return m
+		return m, nil
 	}
 	target := *m.pendingRewind
 	m.pendingRewind = nil
 
 	if err := m.checkpointStore.Restore(target.hash); err != nil {
 		m.appendLine(errorStyle.Render("rewind failed: " + err.Error()))
-		return m
+		return m, nil
 	}
 
 	m.messages = m.messages[:target.messageIndex]
@@ -144,9 +144,25 @@ func (m Model) confirmRewind() Model {
 			break
 		}
 	}
+	// Same reasoning /new and /resume already apply (see their own doc
+	// comments): the conversation just changed shape out from under
+	// these, so an index describing a position in the pre-rewind
+	// history (ctrl+o's target, the doom-loop counters) doesn't mean
+	// anything here anymore.
+	m.lastToolResultIdx = -1
+	m.lastToolCallKey = ""
+	m.toolCallRepeatCount = 0
 
 	m.entries = renderHistory(m.messages)
 	m.appendLine(dimStyle.Render(fmt.Sprintf("── rewound to %q ──", target.label)))
 	m.refreshAndMaybeStickToBottom()
-	return m
+
+	// Persist the truncated conversation immediately — without this,
+	// quitting right after a rewind resumed the *pre-rewind* conversation
+	// against the *rewound* files on next launch, even though /help
+	// promises "restore code+conversation", not just the code half.
+	// Restore also just rewrote the working tree, so the cached status
+	// bar's dirty/branch segment needs refreshing too, same as any other
+	// file-changing action.
+	return m, tea.Batch(saveSession(m.workDir, m.sessionID, m.messages), refreshGitStatus(m.workDir))
 }

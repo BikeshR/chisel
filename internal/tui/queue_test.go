@@ -15,10 +15,10 @@ func TestEnterWhileBusyQueuesInsteadOfSwallowing(t *testing.T) {
 	m.state = stateWaitingModel
 	m.textArea.SetValue("what about this too")
 
-	gotTeaModel, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd != nil {
-		t.Error("expected a nil Cmd — queueing doesn't start a new request")
-	}
+	gotTeaModel, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	// A Cmd here is expected now (it persists the queued text to recall
+	// history — see recordHistory) — what actually matters is that
+	// queueing doesn't start a new model request, checked below via state.
 	got := gotTeaModel.(Model)
 	if len(got.queuedMessages) != 1 || got.queuedMessages[0] != "what about this too" {
 		t.Errorf("queuedMessages = %+v, want the typed text queued", got.queuedMessages)
@@ -68,6 +68,50 @@ func TestDequeueOrSubmitDeliversNextQueuedMessage(t *testing.T) {
 	}
 	if m.state != stateWaitingModel {
 		t.Errorf("state = %v, want stateWaitingModel", m.state)
+	}
+}
+
+// TestDequeueOrSubmitRoutesQueuedCommandNotAsPlainText is the regression
+// test for a real bug: dequeueOrSubmit used to call submitText directly
+// on whatever text was queued, bypassing the "/" and "!" routing submit()
+// applies to a live submission — so a "/status" typed while chisel was
+// busy got delivered to the model as a literal user message reading
+// "/status" instead of ever actually running the command.
+func TestDequeueOrSubmitRoutesQueuedCommandNotAsPlainText(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3"), workDir: "/some/project", queuedMessages: []string{"/status"}}
+
+	m.dequeueOrSubmit()
+
+	if len(m.messages) != 0 {
+		t.Errorf("messages = %+v, want /status to never reach the model as a plain message", m.messages)
+	}
+	found := false
+	for _, l := range m.renderedLines() {
+		if strings.Contains(l, "workdir") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("lines = %+v, want /status to have actually run", m.renderedLines())
+	}
+}
+
+// TestDequeueOrSubmitRoutesQueuedBangNotAsPlainText mirrors the command
+// case for "!" bang mode.
+func TestDequeueOrSubmitRoutesQueuedBangNotAsPlainText(t *testing.T) {
+	m := Model{workDir: t.TempDir(), queuedMessages: []string{"!echo from-queue"}}
+	m.bash = agent.NewBashSession(m.workDir)
+	defer m.bash.Close()
+
+	cmd := m.dequeueOrSubmit()
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd to run the queued bang command")
+	}
+	if len(m.messages) != 0 {
+		t.Errorf("messages = %+v, want bang commands to never reach the model", m.messages)
+	}
+	if m.state != stateExecutingTool {
+		t.Errorf("state = %v, want stateExecutingTool while the bang command runs", m.state)
 	}
 }
 

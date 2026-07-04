@@ -103,6 +103,36 @@ func TestHandleCompactResultSuccess(t *testing.T) {
 	}
 }
 
+// TestHandleCompactResultDeliversQueuedMessage is the regression test
+// for a real bug: handleCompactResult returned to stateInput without
+// ever calling dequeueOrSubmit, so a message typed while compacting was
+// announced "→ queued: …" and then stranded — including after an
+// *auto*-triggered /compact, reachable without the user ever typing
+// /compact themselves (see the auto-compact branch in
+// handleStreamComplete).
+func TestHandleCompactResultDeliversQueuedMessage(t *testing.T) {
+	m := Model{
+		client:         agent.New("minimax-m3"),
+		state:          stateWaitingModel,
+		messages:       []agent.Message{{Role: "user", Content: "a"}, {Role: "assistant", Content: "b"}},
+		queuedMessages: []string{"what's next"},
+	}
+	got, cmd := m.handleCompactResult(compactResultMsg{summary: "did X"})
+	gotModel := got.(Model)
+
+	if len(gotModel.queuedMessages) != 0 {
+		t.Errorf("queuedMessages = %+v, want the queued message delivered, not left stranded", gotModel.queuedMessages)
+	}
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd to deliver the queued message")
+	}
+	// The queued text became the next user message, on top of the
+	// compacted (single-summary) history.
+	if len(gotModel.messages) != 2 || gotModel.messages[1].Content != "what's next" {
+		t.Errorf("messages = %+v, want the queued message appended after the compacted summary", gotModel.messages)
+	}
+}
+
 func TestHandleCompactResultError(t *testing.T) {
 	m := Model{
 		state:    stateWaitingModel,

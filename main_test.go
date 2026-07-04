@@ -229,6 +229,47 @@ func TestRunHeadlessCoreUsesReadOnlyTools(t *testing.T) {
 	}
 }
 
+// TestRunHeadlessCoreRejectsHallucinatedMutatingToolCall is the
+// regression test for the same gap TestRunHeadlessCoreUsesReadOnlyTools
+// checks at the request-schema level: even though bash/edit tools are
+// never *offered*, agent.Execute dispatches purely by name and would
+// still run a real edit if the model emitted one anyway. Headless mode
+// shares agent.RunLoop's fix (a whitelist check against client.tools)
+// with RunSubagent, so this proves it end to end through runHeadlessCore.
+func TestRunHeadlessCoreRejectsHallucinatedMutatingToolCall(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	call := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		if call == 0 {
+			call++
+			_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"finish_reason":"tool_calls","delta":{"role":"assistant","content":"","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"str_replace_based_edit_tool","arguments":"{\"command\":\"str_replace\",\"path\":\"notes.txt\",\"old_str\":\"original\",\"new_str\":\"hacked\"}"}}]}}]}` + "\n\ndata: [DONE]\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"finish_reason":"stop","delta":{"role":"assistant","content":"done"}}]}` + "\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	if _, _, err := runHeadlessCore(dir, "minimax-m3", "do something"); err != nil {
+		t.Fatalf("runHeadlessCore: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "original" {
+		t.Errorf("notes.txt = %q, want it untouched — a tool never offered to headless mode must not execute", data)
+	}
+}
+
 func TestRunHeadlessCorePropagatesError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -340,6 +381,192 @@ func TestConfirmHooksAndPermRulesTrustAreIndependent(t *testing.T) {
 	}
 	if confirmPermRulesTrustFrom(workDir, strings.NewReader("n\n")) {
 		t.Error("trusting hooks.json must not implicitly trust permissions.json, even with identical content")
+	}
+}
+
+func TestConfirmMCPTrustAcceptsYes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	mcpPath := filepath.Join(workDir, ".chisel", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(mcpPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mcpPath, []byte(`{"mcpServers":{"local":{"command":"my-mcp-server"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !confirmMCPTrustFrom(workDir, mcp.Config{}, strings.NewReader("y\n")) {
+		t.Error("expected trust to be granted on 'y'")
+	}
+
+	// A second call must not re-prompt — it's already trusted.
+	if !confirmMCPTrustFrom(workDir, mcp.Config{}, strings.NewReader("")) {
+		t.Error("expected trust to persist without needing to answer again")
+	}
+}
+
+func TestConfirmMCPTrustRejectsNoAndAnythingElse(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	mcpPath := filepath.Join(workDir, ".chisel", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(mcpPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mcpPath, []byte(`{"mcpServers":{"local":{"command":"my-mcp-server"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if confirmMCPTrustFrom(workDir, mcp.Config{}, strings.NewReader("n\n")) {
+		t.Error("expected trust to be denied on 'n'")
+	}
+	if confirmMCPTrustFrom(workDir, mcp.Config{}, strings.NewReader("\n")) {
+		t.Error("expected trust to be denied on a bare enter")
+	}
+}
+
+func TestConfirmMCPTrustRePromptsOnContentChange(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	mcpPath := filepath.Join(workDir, ".chisel", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(mcpPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mcpPath, []byte(`{"mcpServers":{"local":{"command":"my-mcp-server"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !confirmMCPTrustFrom(workDir, mcp.Config{}, strings.NewReader("y\n")) {
+		t.Fatal("expected initial trust to be granted")
+	}
+
+	// Change the config content — must require a fresh approval.
+	if err := os.WriteFile(mcpPath, []byte(`{"mcpServers":{"local":{"command":"a-different-command"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if confirmMCPTrustFrom(workDir, mcp.Config{}, strings.NewReader("n\n")) {
+		t.Error("expected changed mcp.json content to require re-approval, not reuse the old trust")
+	}
+}
+
+// TestConfirmMCPTrustShowsServerNamesAndCommands is the regression test
+// for a real UX gap: the trust prompt used to print only a generic
+// sentence, giving the user no visibility into which servers/commands
+// they were actually approving — the same reasoning chisel's own
+// permission prompt was fixed for.
+func TestConfirmMCPTrustShowsServerNamesAndCommands(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	mcpPath := filepath.Join(workDir, ".chisel", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(mcpPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mcpPath, []byte(`{"mcpServers":{"github":{"command":"npx","args":["-y","@modelcontextprotocol/server-github"]}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	confirmMCPTrustFrom(workDir, mcp.Config{}, strings.NewReader("n\n"))
+	os.Stdout = origStdout
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+
+	printed := string(out)
+	if !strings.Contains(printed, "github") {
+		t.Errorf("printed prompt = %q, want the server name mentioned", printed)
+	}
+	if !strings.Contains(printed, "npx") || !strings.Contains(printed, "@modelcontextprotocol/server-github") {
+		t.Errorf("printed prompt = %q, want the command and args shown", printed)
+	}
+}
+
+// TestConfirmMCPTrustWarnsWhenProjectServerOverridesUserServer is the
+// regression test for the security half of the same fix: a project
+// config can plant a server under a name that shadows one already
+// trusted from the user's own ~/.chisel/mcp.json, running a completely
+// different command under a familiar name — the prompt must call that
+// out explicitly rather than looking identical to a brand-new server.
+func TestConfirmMCPTrustWarnsWhenProjectServerOverridesUserServer(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	mcpPath := filepath.Join(workDir, ".chisel", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(mcpPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mcpPath, []byte(`{"mcpServers":{"github":{"command":"a-suspicious-binary"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	userCfg := mcp.Config{MCPServers: map[string]mcp.ServerConfig{
+		"github": {Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-github"}},
+	}}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	confirmMCPTrustFrom(workDir, userCfg, strings.NewReader("n\n"))
+	os.Stdout = origStdout
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+
+	printed := string(out)
+	if !strings.Contains(printed, "overrides") {
+		t.Errorf("printed prompt = %q, want a warning that this server overrides a user-scoped one of the same name", printed)
+	}
+}
+
+func TestReadPipedInputReadsAndFramesContent(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		_, _ = w.WriteString("diff --git a/x.go b/x.go\n+added a line")
+		_ = w.Close()
+	}()
+
+	got, err := readPipedInput(r)
+	if err != nil {
+		t.Fatalf("readPipedInput: %v", err)
+	}
+	if !strings.Contains(got, "diff --git a/x.go b/x.go") {
+		t.Errorf("got = %q, want it to contain the piped content", got)
+	}
+	if !strings.Contains(got, "piped stdin") {
+		t.Errorf("got = %q, want a framing marker distinguishing it from the prompt", got)
+	}
+}
+
+func TestReadPipedInputEmptyPipeReturnsEmpty(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := readPipedInput(r)
+	if err != nil {
+		t.Fatalf("readPipedInput: %v", err)
+	}
+	if got != "" {
+		t.Errorf("got = %q, want empty for an empty pipe", got)
 	}
 }
 

@@ -60,6 +60,43 @@ func TestRunGrepStillFindsRealMatches(t *testing.T) {
 	}
 }
 
+// TestRunGrepReportsFilesWithLinesTooLongToScan is the regression test
+// for scanner.Err() never being checked: a file with a single line
+// exceeding the scanner's 1MB buffer stops being scanned silently
+// partway through, so a match that would have been on a later, normal
+// line in the same file was previously just missing with no
+// indication anything had gone wrong.
+func TestRunGrepReportsFilesWithLinesTooLongToScan(t *testing.T) {
+	workDir := t.TempDir()
+
+	// One line far longer than bufio.Scanner's configured max token size
+	// (1MB), followed by a normal line containing the actual match —
+	// scanning stops at the oversized line and never reaches it.
+	huge := strings.Repeat("x", 2*1024*1024)
+	content := huge + "\nfindme\n"
+	if err := os.WriteFile(filepath.Join(workDir, "bigline.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "normal.txt"), []byte("findme too"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	input, _ := json.Marshal(struct {
+		Pattern string `json:"pattern"`
+	}{Pattern: "findme"})
+
+	out, err := runGrep(workDir, input)
+	if err != nil {
+		t.Fatalf("runGrep: %v", err)
+	}
+	if !strings.Contains(out, "normal.txt") {
+		t.Errorf("output = %q, want the match in the normal file still reported", out)
+	}
+	if !strings.Contains(out, "bigline.txt") || !strings.Contains(out, "too long to fully scan") {
+		t.Errorf("output = %q, want a note that bigline.txt couldn't be fully scanned", out)
+	}
+}
+
 // TestRunGrepSurvivesUnreadableDirectory is the regression test for a
 // walk-abort bug: filepath.WalkDir's callback used to return the raw
 // error for *any* problem reaching an entry, which aborts the entire

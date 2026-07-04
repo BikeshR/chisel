@@ -15,7 +15,7 @@ func TestExpandFileReferencesInjectsContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := expandFileReferences(workDir, "check @notes.txt please")
+	got, _ := expandFileReferences(workDir, "check @notes.txt please")
 	if !strings.Contains(got, "the secret is banana") {
 		t.Errorf("got %q, want the file's content injected", got)
 	}
@@ -29,7 +29,7 @@ func TestExpandFileReferencesInjectsContent(t *testing.T) {
 
 func TestExpandFileReferencesLeavesUnresolvableTokenAsLiteralText(t *testing.T) {
 	workDir := t.TempDir()
-	got := expandFileReferences(workDir, "ask @someone about this")
+	got, _ := expandFileReferences(workDir, "ask @someone about this")
 	if got != "ask @someone about this" {
 		t.Errorf("got %q, want the unresolvable @token left unchanged", got)
 	}
@@ -42,7 +42,7 @@ func TestExpandFileReferencesRejectsEscapingPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := expandFileReferences(workDir, "look at @../../../etc/passwd")
+	got, _ := expandFileReferences(workDir, "look at @../../../etc/passwd")
 	if strings.Contains(got, "root:") {
 		t.Error("expandFileReferences read a file outside workDir")
 	}
@@ -57,9 +57,46 @@ func TestExpandFileReferencesHandlesMultipleReferences(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := expandFileReferences(workDir, "compare @a.txt and @b.txt")
+	got, _ := expandFileReferences(workDir, "compare @a.txt and @b.txt")
 	if !strings.Contains(got, "AAA") || !strings.Contains(got, "BBB") {
 		t.Errorf("got %q, want both files' content injected", got)
+	}
+}
+
+// TestExpandFileReferencesCapsInjectedContent is the regression test for
+// a real gap: a tool result is capped at agent.maxToolOutputChars
+// precisely because oversized content gets resent on every subsequent
+// request, but an @-referenced file bypassed that entirely and
+// invisibly (the transcript only ever shows what was typed, never the
+// expansion) — the only unbounded path into the context window.
+func TestExpandFileReferencesCapsInjectedContent(t *testing.T) {
+	workDir := t.TempDir()
+	huge := strings.Repeat("x", 50_000)
+	if err := os.WriteFile(filepath.Join(workDir, "huge.txt"), []byte(huge), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, truncated := expandFileReferences(workDir, "look at @huge.txt")
+	if len(truncated) != 1 || truncated[0] != "huge.txt" {
+		t.Errorf("truncated = %+v, want [\"huge.txt\"]", truncated)
+	}
+	if strings.Count(got, "x") >= 50_000 {
+		t.Errorf("expanded content has %d 'x' characters, want it capped well below the full 50000", strings.Count(got, "x"))
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Error("want a truncation marker in the injected content")
+	}
+}
+
+func TestExpandFileReferencesSmallFileNotFlaggedTruncated(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "small.txt"), []byte("tiny"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, truncated := expandFileReferences(workDir, "look at @small.txt")
+	if len(truncated) != 0 {
+		t.Errorf("truncated = %+v, want none for a small file", truncated)
 	}
 }
 
@@ -81,6 +118,32 @@ func TestSubmitTextShowsOriginalButSendsExpanded(t *testing.T) {
 
 	if len(gotModel.messages) != 1 || !strings.Contains(gotModel.messages[0].Content, "file content here") {
 		t.Errorf("messages = %+v, want the expanded content sent to the model", gotModel.messages)
+	}
+}
+
+// TestSubmitTextNotesTruncatedFileReference confirms the user, not just
+// the model, learns when an @-referenced file got capped — the
+// transcript otherwise never shows the expansion at all.
+func TestSubmitTextNotesTruncatedFileReference(t *testing.T) {
+	workDir := t.TempDir()
+	huge := strings.Repeat("x", 50_000)
+	if err := os.WriteFile(filepath.Join(workDir, "huge.txt"), []byte(huge), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newInputModel()
+	m.workDir = workDir
+
+	gotModel, _ := m.submitText("look at @huge.txt")
+
+	found := false
+	for _, l := range gotModel.renderedLines() {
+		if strings.Contains(l, "huge.txt") && strings.Contains(l, "truncated") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("lines = %+v, want a note that huge.txt was truncated", gotModel.renderedLines())
 	}
 }
 

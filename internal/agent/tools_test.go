@@ -156,6 +156,28 @@ func TestTruncateOutputCutsAtRuneBoundary(t *testing.T) {
 	}
 }
 
+func TestExecuteTruncatesErrorContentTheSameAsSuccessContent(t *testing.T) {
+	// An unrecognized tool name is the simplest way to force Execute's
+	// error path without needing a live bash session — the error message
+	// embeds the name verbatim, so an oversized name produces an oversized
+	// error the same shape as a bash-timeout's embedded partial output.
+	longName := strings.Repeat("x", maxToolOutputChars+500)
+	result := Execute(t.Context(), t.TempDir(), "", call(longName, "{}"), nil, nil)
+
+	if !result.IsError {
+		t.Fatal("expected an error result for an unknown tool")
+	}
+	if !utf8.ValidString(result.Content) {
+		t.Fatal("Execute produced invalid UTF-8 in a truncated error")
+	}
+	if got := utf8.RuneCountInString(result.Content); got > maxToolOutputChars+100 {
+		t.Errorf("error content is %d runes, want it capped near maxToolOutputChars (%d)", got, maxToolOutputChars)
+	}
+	if !strings.Contains(result.Content, "truncated") {
+		t.Error("expected a truncation marker on an oversized error message")
+	}
+}
+
 func TestRunEditorCreateNestedDirectories(t *testing.T) {
 	workDir := t.TempDir()
 	input, _ := json.Marshal(editorInput{Command: "create", Path: "a/b/c/new.go", FileText: "package main\n"})

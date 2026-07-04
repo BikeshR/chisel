@@ -139,6 +139,44 @@ func TestExecuteToolPostHookSkippedOnFailure(t *testing.T) {
 	}
 }
 
+// TestExecuteToolCapsCombinedPostHookOutput is the regression test for
+// a real gap: every built-in tool's own output is capped via
+// agent.TruncateOutput inside agent.Execute specifically because
+// oversized content gets resent on every subsequent request until
+// /compact, but a postToolUse hook's output was appended *after* that
+// cap with no re-check — a verbose linter or formatter hook could push
+// an otherwise-small result back over the same limit, uncapped.
+func TestExecuteToolCapsCombinedPostHookOutput(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hooksCfg := hooks.Config{}
+	hooksCfg.Hooks.PostToolUse = []hooks.Hook{
+		// yes(1) with a byte count comfortably prints well past
+		// maxToolOutputChars (40k) before head cuts it off.
+		{Match: "str_replace_based_edit_tool", Command: "yes x | head -c 60000"},
+	}
+
+	call := agent.ToolCall{ID: "call_1", Function: agent.ToolCallFunction{
+		Name:      "str_replace_based_edit_tool",
+		Arguments: `{"command":"str_replace","path":"a.go","old_str":"package main","new_str":"package other"}`,
+	}}
+
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, call)
+	result := cmd().(toolResultMsg).result
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if len([]rune(result.Content)) > 41_000 {
+		t.Errorf("result.Content is %d runes, want it capped near agent's maxToolOutputChars even after the post-hook's own output was appended", len([]rune(result.Content)))
+	}
+	if !strings.Contains(result.Content, "truncated") {
+		t.Error("expected a truncation marker in the combined output")
+	}
+}
+
 func TestExecuteToolThreadsSkillsToLoadSkill(t *testing.T) {
 	dir := t.TempDir()
 	skills := map[string]skill.Skill{
