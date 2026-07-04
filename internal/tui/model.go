@@ -73,6 +73,11 @@ type Model struct {
 	// the user types (or nothing, if they just hit enter) becomes the
 	// reason fed back to the model. See submit() in update.go.
 	awaitingDenialReason bool
+	// knownBrokenMCP records which MCP servers have already been
+	// reported as broken and had their tools dropped from the client —
+	// see syncMCPHealth — so a server that was already handled once
+	// doesn't get re-announced (or re-attempt tool removal) every turn.
+	knownBrokenMCP map[string]bool
 
 	// streamLineIdx is the index into entries of the assistant line
 	// currently being built from streamed text deltas, or -1 if none is
@@ -249,6 +254,30 @@ func (m *Model) refreshAndMaybeStickToBottom() {
 	m.refreshViewport()
 	if stuck {
 		m.viewport.GotoBottom()
+	}
+}
+
+// syncMCPHealth checks for MCP servers that have newly gone broken
+// (see mcp.Server.markBroken) since the last check, and for each:
+// drops its tools from the client (there's no point continuing to
+// offer the model a tool that will just fail every time) and reports
+// it once in the transcript. Without this, a dead server's tools stayed
+// in every request indefinitely and the model kept trying them with no
+// indication anything was wrong — only ever visible via /status,
+// checked on demand, not surfaced proactively. Cheap enough (an
+// in-memory map lookup per configured server) to call at the start of
+// every turn rather than needing a background poller.
+func (m *Model) syncMCPHealth() {
+	for _, s := range m.mcp.Statuses() {
+		if !s.Broken || m.knownBrokenMCP[s.Name] {
+			continue
+		}
+		if m.knownBrokenMCP == nil {
+			m.knownBrokenMCP = make(map[string]bool)
+		}
+		m.knownBrokenMCP[s.Name] = true
+		m.client.RemoveToolsWithPrefix("mcp__" + s.Name + "__")
+		m.appendLine(errorStyle.Render(fmt.Sprintf("mcp: %s is no longer responding — its tools have been removed for this session", s.Name)))
 	}
 }
 

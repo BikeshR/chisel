@@ -3,6 +3,8 @@ package tui
 import (
 	"fmt"
 	"strings"
+
+	"github.com/BikeshR/chisel/internal/mcp"
 )
 
 func (m Model) View() string {
@@ -43,6 +45,24 @@ func (m Model) statusLine() string {
 		plan = planModeStyle.Render("PLAN MODE") + " · "
 	}
 
-	return fmt.Sprintf(" %s%s · context %s · spent %s in / %s out · ctrl+c to quit",
-		plan, m.client.ModelName(), context, formatTokenCount(m.tokensIn), formatTokenCount(m.tokensOut))
+	mcpWarning := ""
+	if broken := brokenMCPCount(m.mcp.Statuses()); broken > 0 {
+		mcpWarning = errorStyle.Render(fmt.Sprintf("%d mcp broken", broken)) + " · "
+	}
+
+	return fmt.Sprintf(" %s%s%s · context %s · spent %s in / %s out · ctrl+c to quit",
+		plan, mcpWarning, m.client.ModelName(), context, formatTokenCount(m.tokensIn), formatTokenCount(m.tokensOut))
+}
+
+// brokenMCPCount counts how many of statuses are currently broken —
+// shown in the status bar so a dead MCP server (previously only ever
+// visible via /status, checked on demand) is visible at a glance.
+func brokenMCPCount(statuses []mcp.ServerStatus) int {
+	n := 0
+	for _, s := range statuses {
+		if s.Broken {
+			n++
+		}
+	}
+	return n
 }

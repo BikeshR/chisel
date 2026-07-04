@@ -6,6 +6,7 @@ import (
 
 	"github.com/BikeshR/chisel/internal/agent"
 	"github.com/BikeshR/chisel/internal/hooks"
+	"github.com/BikeshR/chisel/internal/mcp"
 )
 
 func TestHandleHelpCommandListsCommandsAndKeys(t *testing.T) {
@@ -94,4 +95,30 @@ func TestHandleStatusCommandReportsNoHooksOrMemoryWhenAbsent(t *testing.T) {
 	if !strings.Contains(joined, "memory: none loaded") {
 		t.Errorf("status output = %q, want it to report no memory loaded", joined)
 	}
+}
+
+func TestBrokenMCPCountCountsOnlyBroken(t *testing.T) {
+	statuses := []mcp.ServerStatus{
+		{Name: "ok-server", Broken: false},
+		{Name: "dead-server", Broken: true},
+		{Name: "another-dead", Broken: true},
+	}
+	if got := brokenMCPCount(statuses); got != 2 {
+		t.Errorf("brokenMCPCount = %d, want 2", got)
+	}
+}
+
+func TestBrokenMCPCountZeroForNoServers(t *testing.T) {
+	if got := brokenMCPCount(nil); got != 0 {
+		t.Errorf("brokenMCPCount(nil) = %d, want 0", got)
+	}
+}
+
+// TestSyncMCPHealthWithNilRegistryDoesNotPanic covers the common
+// test-construction case (a bare Model{} with no real MCP registry) —
+// syncMCPHealth is called unconditionally at the start of every turn,
+// so it must be safe even when nothing is configured.
+func TestSyncMCPHealthWithNilRegistryDoesNotPanic(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3")}
+	m.syncMCPHealth()
 }

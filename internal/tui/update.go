@@ -235,6 +235,8 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		m.preTurnDirty, _ = gitutil.DirtyPaths(m.workDir)
 	}
 
+	m.syncMCPHealth()
+
 	m.messages = append(m.messages, agent.Message{Role: "user", Content: text})
 	m.appendLine(userStyle.Render("you  ") + text)
 	m.state = stateWaitingModel

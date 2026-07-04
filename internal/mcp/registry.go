@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // toolPrefix names every tool a configured MCP server contributes as
@@ -21,9 +22,13 @@ type Registry struct {
 }
 
 // LoadAndStartAll reads ~/.chisel/mcp.json (if present) and starts every
-// configured server. A server that fails to start is not fatal to
-// chisel as a whole — its error is returned alongside a Registry holding
-// whatever did start, so the rest of the tool set still works.
+// configured server concurrently — sequentially, one server's handshake
+// (which can mean an npx cold download) blocked every other server's,
+// and the whole app launch behind all of them; started in parallel, the
+// wait is bounded by the slowest single server instead of their sum. A
+// server that fails to start is not fatal to chisel as a whole — its
+// error is returned alongside a Registry holding whatever did start, so
+// the rest of the tool set still works.
 func LoadAndStartAll() (*Registry, []error) {
 	cfg, ok, err := LoadConfig()
 	if err != nil {
@@ -33,9 +38,22 @@ func LoadAndStartAll() (*Registry, []error) {
 		return &Registry{servers: map[string]*Server{}}, nil
 	}
 
-	r := &Registry{servers: make(map[string]*Server, len(cfg.MCPServers))}
-	var errs []error
-	for name, serverCfg := range cfg.MCPServers {
+	names := make([]string, 0, len(cfg.MCPServers))
+	for name := range cfg.MCPServers {
+		names = append(names, name)
+	}
+
+	type startResult struct {
+		name string
+		s    *Server
+		err  error
+	}
+	// Each goroutine writes only to its own index — no shared mutable
+	// state, so no mutex is needed here.
+	results := make([]startResult, len(names))
+
+	var wg sync.WaitGroup
+	for i, name := range names {
 		// SplitToolName finds the server/tool boundary by cutting at the
 		// *first* "__" in mcp__<server>__<tool> — a server name that
 		// itself contains "__" (e.g. "my__server") would make that cut
@@ -43,15 +61,26 @@ func LoadAndStartAll() (*Registry, []error) {
 		// reject the name here rather than starting a server whose tools
 		// can never be dispatched correctly.
 		if strings.Contains(name, "__") {
-			errs = append(errs, fmt.Errorf("mcp server %q: name must not contain \"__\" — it's used as the delimiter between server and tool name in mcp__<server>__<tool>", name))
+			results[i] = startResult{name: name, err: fmt.Errorf("name must not contain \"__\" — it's used as the delimiter between server and tool name in mcp__<server>__<tool>")}
 			continue
 		}
-		s, err := Start(name, serverCfg)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("mcp server %q: %w", name, err))
+		wg.Add(1)
+		go func(i int, name string, serverCfg ServerConfig) {
+			defer wg.Done()
+			s, err := Start(name, serverCfg)
+			results[i] = startResult{name: name, s: s, err: err}
+		}(i, name, cfg.MCPServers[name])
+	}
+	wg.Wait()
+
+	r := &Registry{servers: make(map[string]*Server, len(names))}
+	var errs []error
+	for _, res := range results {
+		if res.err != nil {
+			errs = append(errs, fmt.Errorf("mcp server %q: %w", res.name, res.err))
 			continue
 		}
-		r.servers[name] = s
+		r.servers[res.name] = res.s
 	}
 	return r, errs
 }

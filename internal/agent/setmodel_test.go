@@ -1,6 +1,9 @@
 package agent
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSetModelPreservesToolsPlanModeAndMemory(t *testing.T) {
 	c := New("minimax-m3")
@@ -28,5 +31,35 @@ func TestSetModelPreservesToolsPlanModeAndMemory(t *testing.T) {
 	}
 	if c.memory != "this repo uses gofmt" {
 		t.Errorf("memory = %q, want it preserved", c.memory)
+	}
+}
+
+func TestRemoveToolsWithPrefix(t *testing.T) {
+	c := New("minimax-m3")
+	builtinCount := len(c.tools)
+	c.AddTools([]Tool{
+		{Type: "function", Function: ToolFunction{Name: "mcp__github__list_issues"}},
+		{Type: "function", Function: ToolFunction{Name: "mcp__github__create_issue"}},
+		{Type: "function", Function: ToolFunction{Name: "mcp__other__do_thing"}},
+	})
+
+	c.RemoveToolsWithPrefix("mcp__github__")
+
+	if len(c.tools) != builtinCount+1 {
+		t.Fatalf("got %d tools, want %d (built-ins + the one surviving mcp__other__ tool)", len(c.tools), builtinCount+1)
+	}
+	for _, tool := range c.tools {
+		if strings.HasPrefix(tool.Function.Name, "mcp__github__") {
+			t.Errorf("tool %q survived removal", tool.Function.Name)
+		}
+	}
+	foundOther := false
+	for _, tool := range c.tools {
+		if tool.Function.Name == "mcp__other__do_thing" {
+			foundOther = true
+		}
+	}
+	if !foundOther {
+		t.Error("a tool from a different server was incorrectly removed")
 	}
 }

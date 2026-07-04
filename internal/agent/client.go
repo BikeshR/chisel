@@ -101,6 +101,22 @@ func (c *Client) AddTools(tools []Tool) {
 	c.tools = append(c.tools, tools...)
 }
 
+// RemoveToolsWithPrefix drops every tool whose name starts with prefix
+// from the set sent with future requests — used once an MCP server is
+// discovered to be broken (see mcp.Server, whose tools are all named
+// mcp__<server>__<tool>): there's no point continuing to offer the
+// model a tool that will just fail every time, with no way back short
+// of restarting chisel entirely.
+func (c *Client) RemoveToolsWithPrefix(prefix string) {
+	kept := c.tools[:0]
+	for _, t := range c.tools {
+		if !strings.HasPrefix(t.Function.Name, prefix) {
+			kept = append(kept, t)
+		}
+	}
+	c.tools = kept
+}
+
 // SetPlanMode toggles plan mode, which appends planModeNote to the system
 // prompt sent with every request from here on.
 func (c *Client) SetPlanMode(enabled bool) {

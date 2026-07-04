@@ -3,10 +3,12 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRegistryToolsAreNamespaced(t *testing.T) {
@@ -158,4 +160,64 @@ func TestRegistryClose(t *testing.T) {
 	}
 	r := &Registry{servers: map[string]*Server{"fake": s}}
 	r.Close() // should not panic or hang
+}
+
+// TestLoadAndStartAllStartsServersConcurrently is the real proof for
+// the concurrency fix: three servers, each artificially slow to
+// initialize (simulating an npx cold download), started via one
+// LoadAndStartAll call. Sequential startup would take roughly 3x the
+// per-server delay; concurrent startup should take roughly 1x.
+func TestLoadAndStartAllStartsServersConcurrently(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	const delayMS = 300
+	cfgPath := filepath.Join(home, ".chisel", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	server := func() map[string]any {
+		return map[string]any{
+			"command": os.Args[0],
+			"env": map[string]string{
+				"CHISEL_MCP_FAKE_SERVER":          "1",
+				"CHISEL_MCP_FAKE_SERVER_DELAY_MS": fmt.Sprintf("%d", delayMS),
+			},
+		}
+	}
+	cfg := map[string]any{
+		"mcpServers": map[string]any{
+			"one":   server(),
+			"two":   server(),
+			"three": server(),
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	r, errs := LoadAndStartAll()
+	elapsed := time.Since(start)
+	defer r.Close()
+
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(r.servers) != 3 {
+		t.Fatalf("got %d servers, want 3", len(r.servers))
+	}
+
+	// A generous margin above one delay, but well under what sequential
+	// startup (3x) would take — this is a real wall-clock assertion,
+	// not a mock, so it needs enough slack to not be flaky while still
+	// clearly distinguishing concurrent from sequential.
+	if elapsed > 2*delayMS*time.Millisecond {
+		t.Errorf("LoadAndStartAll took %s for 3 servers each delayed %dms — want close to one delay (concurrent), not the sum (sequential)", elapsed, delayMS)
+	}
 }

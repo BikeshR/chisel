@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,15 @@ func runFakeServer() {
 		var result any
 		switch req.Method {
 		case "initialize":
+			// Only used by TestLoadAndStartAllStartsServersConcurrently —
+			// simulates a slow-to-start server (an npx cold download, in
+			// practice) so that test can prove multiple servers start in
+			// parallel rather than one after another.
+			if ms := os.Getenv("CHISEL_MCP_FAKE_SERVER_DELAY_MS"); ms != "" {
+				if n, err := strconv.Atoi(ms); err == nil {
+					time.Sleep(time.Duration(n) * time.Millisecond)
+				}
+			}
 			result = initializeResult{ProtocolVersion: protocolVersion}
 		case "tools/list":
 			result = toolsListResult{Tools: []Tool{
