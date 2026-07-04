@@ -133,6 +133,9 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 
+	vp := viewport.New(80, 20)
+	vp.MouseWheelEnabled = true
+
 	m := Model{
 		client:        client,
 		workDir:       workDir,
@@ -141,7 +144,7 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 		hooks:         hooksCfg,
 		messages:      resumed,
 		textInput:     ti,
-		viewport:      viewport.New(80, 20),
+		viewport:      vp,
 		spinner:       sp,
 		state:         stateInput,
 		streamLineIdx: -1,
@@ -181,16 +184,14 @@ func (m Model) Init() tea.Cmd {
 
 func (m *Model) appendLine(s string) {
 	m.entries = append(m.entries, entry{styled: s})
-	m.refreshViewport()
-	m.viewport.GotoBottom()
+	m.refreshAndMaybeStickToBottom()
 }
 
 // appendAssistantEntry is appendLine's counterpart for text that should
 // be re-collapsible/expandable by /think — see entry.isAssistant.
 func (m *Model) appendAssistantEntry(raw string) {
 	m.entries = append(m.entries, entry{isAssistant: true, raw: raw})
-	m.refreshViewport()
-	m.viewport.GotoBottom()
+	m.refreshAndMaybeStickToBottom()
 }
 
 // appendStreamText appends a text delta to the assistant line currently
@@ -203,8 +204,20 @@ func (m *Model) appendStreamText(delta string) {
 	}
 	m.streamText += delta
 	m.entries[m.streamLineIdx].raw = m.streamText
+	m.refreshAndMaybeStickToBottom()
+}
+
+// refreshAndMaybeStickToBottom rebuilds the viewport's content and keeps
+// the view pinned to the bottom only if it already was there — once the
+// user has scrolled up (rereading something, or a permission prompt's
+// diff too long to fit on screen), new content streaming in shouldn't
+// yank them back down to the end.
+func (m *Model) refreshAndMaybeStickToBottom() {
+	stuck := m.viewport.AtBottom()
 	m.refreshViewport()
-	m.viewport.GotoBottom()
+	if stuck {
+		m.viewport.GotoBottom()
+	}
 }
 
 // endStreamLine closes out the in-progress assistant line so the next text

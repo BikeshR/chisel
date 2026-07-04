@@ -26,8 +26,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// viewport's own hard truncation (not wrapping) at msg.Width
 		// would otherwise just cut off anything wider than the new
 		// terminal, silently dropping content rather than reflowing it.
-		m.refreshViewport()
+		m.refreshAndMaybeStickToBottom()
 		return m, nil
+
+	case tea.MouseMsg:
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -69,6 +74,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
 		m.quitting = true
 		return m, tea.Quit
+	}
+
+	if m.handleScrollKey(msg) {
+		return m, nil
 	}
 
 	switch m.state {
@@ -120,6 +129,38 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+// handleScrollKey intercepts transcript-scrolling keys before any
+// state-specific handling below gets a chance to swallow them — a long
+// permission-prompt diff or an in-progress response both need to stay
+// scrollable, not just the idle input state. PgUp/PgDown are always
+// routed (nothing else binds them); ctrl+u/ctrl+d are only intercepted
+// outside stateInput, where they're textinput's own delete-to-cursor
+// bindings instead — reusing the viewport's own keymap-driven Update
+// here would also eat plain letters like "j"/"k"/"f"/"b" while typing,
+// so scrolling calls the viewport's specific methods directly rather
+// than routing the raw KeyMsg through it.
+func (m *Model) handleScrollKey(msg tea.KeyMsg) bool {
+	switch msg.Type {
+	case tea.KeyPgUp:
+		m.viewport.PageUp()
+		return true
+	case tea.KeyPgDown:
+		m.viewport.PageDown()
+		return true
+	case tea.KeyCtrlU:
+		if m.state != stateInput {
+			m.viewport.HalfPageUp()
+			return true
+		}
+	case tea.KeyCtrlD:
+		if m.state != stateInput {
+			m.viewport.HalfPageDown()
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) submit() (tea.Model, tea.Cmd) {

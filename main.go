@@ -61,7 +61,7 @@ func main() {
 	resumed, savedAt, _ := session.Load(workDir)
 	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, memUser, memProject, resumed, savedAt)
 
-	if _, err := tea.NewProgram(tuiModel, tea.WithAltScreen()).Run(); err != nil {
+	if _, err := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "chisel:", err)
 		os.Exit(1)
 	}
