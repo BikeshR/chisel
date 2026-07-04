@@ -152,8 +152,17 @@ func run(ctx context.Context, workDir string, h Hook, toolName, argsJSON, path s
 	// A killed-on-timeout process still reports as some *exec.ExitError,
 	// which would otherwise get misread as an ordinary (if unusual) exit
 	// code rather than the distinct "this hook is hung" condition it is —
-	// check the context first.
+	// check the context first. timeoutCtx.Err() alone can't tell a real
+	// hookTimeout expiry apart from the *parent* ctx (the turn itself)
+	// being cancelled by esc — a user interrupting a turn one second
+	// into a hook otherwise got told the hook "timed out after 30s",
+	// misleading text the model would then see in the tool result too.
+	// Same ctx-vs-derived-timeout distinction mcp.Server.call and
+	// bashsession.go already make for exactly this reason.
 	if timeoutCtx.Err() != nil {
+		if ctx.Err() != nil {
+			return output, -1, fmt.Errorf("hook %q interrupted", h.Command)
+		}
 		return output, -1, fmt.Errorf("hook %q timed out after %s", h.Command, hookTimeout)
 	}
 

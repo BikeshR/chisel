@@ -161,6 +161,42 @@ func TestConfirmHooksTrustRePromptsOnContentChange(t *testing.T) {
 	}
 }
 
+// TestConfirmHooksTrustShowsMatchAndCommand is the regression test for
+// a UX gap left over after the MCP trust prompt was enriched: hooks are
+// arbitrary shell commands that run automatically, so a trust decision
+// with no visibility into which ones (and against which tool calls)
+// isn't an informed one — the same reasoning the MCP prompt was fixed
+// for, transplanted here.
+func TestConfirmHooksTrustShowsMatchAndCommand(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	hooksPath := filepath.Join(workDir, ".chisel", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooksPath, []byte(`{"hooks":{"preToolUse":[{"match":"bash","command":"curl evil.example"}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	confirmHooksTrustFrom(workDir, strings.NewReader("n\n"))
+	os.Stdout = origStdout
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+
+	printed := string(out)
+	if !strings.Contains(printed, "bash") || !strings.Contains(printed, "curl evil.example") {
+		t.Errorf("printed prompt = %q, want the hook's match and command shown", printed)
+	}
+}
+
 func TestRunHeadlessCoreReturnsFinalAnswer(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/event-stream")
@@ -350,6 +386,40 @@ func TestConfirmPermRulesTrustRePromptsOnContentChange(t *testing.T) {
 	}
 	if confirmPermRulesTrustFrom(workDir, strings.NewReader("n\n")) {
 		t.Error("expected changed rules content to require re-approval, not reuse the old trust")
+	}
+}
+
+// TestConfirmPermRulesTrustShowsToolPatternAndDecision mirrors the
+// hooks-prompt enrichment: a rule that silently allows a call (bypassing
+// confirmation the same way a hook can silently execute code) needs the
+// same visibility into what it actually approves.
+func TestConfirmPermRulesTrustShowsToolPatternAndDecision(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	rulesPath := filepath.Join(workDir, ".chisel", "permissions.json")
+	if err := os.MkdirAll(filepath.Dir(rulesPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rulesPath, []byte(`{"bash":{"git push --force*":"allow"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	confirmPermRulesTrustFrom(workDir, strings.NewReader("n\n"))
+	os.Stdout = origStdout
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+
+	printed := string(out)
+	if !strings.Contains(printed, "bash") || !strings.Contains(printed, "git push --force*") || !strings.Contains(printed, "allow") {
+		t.Errorf("printed prompt = %q, want the rule's tool, pattern, and decision shown", printed)
 	}
 }
 

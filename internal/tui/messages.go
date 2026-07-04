@@ -23,6 +23,7 @@ type toolResultMsg struct {
 type modelCheckResultMsg struct {
 	model string
 	reply string
+	usage agent.Usage
 	err   error
 }
 

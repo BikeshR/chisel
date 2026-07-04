@@ -402,7 +402,24 @@ func confirmHooksTrustFrom(workDir string, in io.Reader) bool {
 		return true
 	}
 
-	fmt.Printf("chisel: %s configures hooks — shell commands that run automatically on tool calls, some of which (glob, grep) normally need no confirmation at all.\n", path)
+	// Same reasoning the MCP trust prompt was enriched for, with more
+	// force here: hooks are arbitrary shell commands that run
+	// automatically, so a trust decision with no visibility into what
+	// they actually are isn't an informed one. Best-effort — if the
+	// config doesn't even parse, fall back to the generic message;
+	// LoadConfig reports the real parse error later regardless.
+	var hooksCfgPreview hooks.Config
+	if err := json.Unmarshal(data, &hooksCfgPreview); err != nil || (len(hooksCfgPreview.Hooks.PreToolUse) == 0 && len(hooksCfgPreview.Hooks.PostToolUse) == 0) {
+		fmt.Printf("chisel: %s configures hooks — shell commands that run automatically on tool calls, some of which (glob, grep) normally need no confirmation at all.\n", path)
+	} else {
+		fmt.Printf("chisel: %s configures these hooks:\n", path)
+		for _, h := range hooksCfgPreview.Hooks.PreToolUse {
+			fmt.Printf("  preToolUse  %s: %s\n", h.Match, h.Command)
+		}
+		for _, h := range hooksCfgPreview.Hooks.PostToolUse {
+			fmt.Printf("  postToolUse %s: %s\n", h.Match, h.Command)
+		}
+	}
 	fmt.Print("Trust and run them for this project? [y/N] ")
 
 	reader := bufio.NewReader(in)
@@ -445,7 +462,26 @@ func confirmPermRulesTrustFrom(workDir string, in io.Reader) bool {
 		return true
 	}
 
-	fmt.Printf("chisel: %s configures persistent permission rules — some can silently allow a call (like bash) that would otherwise ask for confirmation every time.\n", path)
+	// Same reasoning the MCP trust prompt was enriched for: a rule that
+	// silently allows a call is exactly the kind of thing a decision
+	// needs visibility into to be an informed one. Best-effort — if the
+	// config doesn't even parse, fall back to the generic message.
+	var rulesCfgPreview permrules.Config
+	if err := json.Unmarshal(data, &rulesCfgPreview); err != nil || !rulesCfgPreview.HasAny() {
+		fmt.Printf("chisel: %s configures persistent permission rules — some can silently allow a call (like bash) that would otherwise ask for confirmation every time.\n", path)
+	} else {
+		fmt.Printf("chisel: %s configures these permission rules:\n", path)
+		tools := make([]string, 0, len(rulesCfgPreview))
+		for tool := range rulesCfgPreview {
+			tools = append(tools, tool)
+		}
+		sort.Strings(tools)
+		for _, tool := range tools {
+			for _, r := range rulesCfgPreview[tool] {
+				fmt.Printf("  %s %q: %s\n", tool, r.Pattern, r.Decision)
+			}
+		}
+	}
 	fmt.Print("Trust and apply them for this project? [y/N] ")
 
 	reader := bufio.NewReader(in)

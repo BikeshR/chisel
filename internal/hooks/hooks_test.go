@@ -179,6 +179,34 @@ func TestHookTimeout(t *testing.T) {
 	}
 }
 
+// TestHookInterruptedByParentContextReportsInterruptedNotTimeout is the
+// regression test for a real UX bug: run() checked only timeoutCtx.Err(),
+// which is also non-nil when the *parent* ctx (the turn itself) was
+// cancelled by esc — so interrupting a turn one second into a hook
+// reported "timed out after 30s" instead of "interrupted", and that
+// misleading text is exactly what the model sees in the tool result.
+func TestHookInterruptedByParentContextReportsInterruptedNotTimeout(t *testing.T) {
+	dir := t.TempDir()
+	list := []Hook{{Match: "*", Command: "sleep 5"}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, _, err := RunPreToolUse(ctx, dir, list, "bash", "{}", "")
+	if err == nil {
+		t.Fatal("expected an error after the parent context was cancelled")
+	}
+	if !strings.Contains(err.Error(), "interrupted") {
+		t.Errorf("error = %v, want it to say \"interrupted\"", err)
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %v, want no misleading timeout text for a user-cancelled hook", err)
+	}
+}
+
 // TestHookTimeoutKillsSlowForegroundGroupQuickly is the regression test
 // for a real bug: on timeout, only the immediate sh process was killed,
 // not its process group — a hook shaped like `sleep 10 & sleep 300`

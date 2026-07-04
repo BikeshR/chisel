@@ -162,7 +162,35 @@ func Save(workDir string, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	return writeAtomic(path, data)
+}
+
+// writeAtomic writes data to path via a temp file plus rename — the
+// same pattern internal/session and internal/trust already use: a
+// plain os.WriteFile can leave a truncated, corrupt permissions.json
+// behind if chisel is killed mid-write (reachable from the "p"
+// permanent-allow prompt, internal/tui/update.go), silently dropping
+// the user's curated allow/deny policy on the next launch.
+func writeAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".permissions-*.json.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }() // no-op once the rename below succeeds
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // Match returns the decision for toolName given argText — the text

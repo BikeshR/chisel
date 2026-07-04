@@ -54,6 +54,29 @@ func TestHandleModelCheckResult(t *testing.T) {
 	})
 }
 
+// TestHandleModelCheckResultCountsUsage is the regression test for a
+// real undercounting bug: /model check sends a real request through the
+// full request shape (system prompt + entire tool set via client.Clone),
+// not a trivially small one, but its usage never reached
+// tokensIn/tokensOut/requestCount — unlike handleCompactResult, which
+// counts its own equally-synthetic request.
+func TestHandleModelCheckResultCountsUsage(t *testing.T) {
+	m := Model{state: stateWaitingModel}
+	got, _ := m.handleModelCheckResult(modelCheckResultMsg{
+		model: "minimax-m3",
+		reply: "ok",
+		usage: agent.Usage{InputTokens: 500, OutputTokens: 20},
+	})
+	gotModel := got.(Model)
+
+	if gotModel.tokensIn != 500 || gotModel.tokensOut != 20 {
+		t.Errorf("tokensIn/tokensOut = %d/%d, want 500/20", gotModel.tokensIn, gotModel.tokensOut)
+	}
+	if gotModel.requestCount != 1 {
+		t.Errorf("requestCount = %d, want 1", gotModel.requestCount)
+	}
+}
+
 // TestHandleModelCheckResultDeliversQueuedMessage is the regression test
 // for the same class of bug as compact_test.go's version: a message
 // typed while a /model check was running used to be queued and then

@@ -117,6 +117,17 @@ func runFakeServer() {
 			if params.Name == "hang" {
 				continue // deliberately never respond
 			}
+			if os.Getenv("CHISEL_MCP_FAKE_SERVER_PING_COLLISION") == "1" {
+				// A server-initiated request with an ID that collides
+				// with the call it's about to answer — chisel's own IDs
+				// start at 1, so id 1 is exactly what a first real call
+				// gets, and exactly what a server's own independent ID
+				// space is likely to pick too. Sent just before the real
+				// response, only used by
+				// TestServerHandlesCollidingServerInitiatedPing.
+				ping, _ := json.Marshal(response{JSONRPC: "2.0", ID: req.ID, Method: "ping"})
+				_, _ = os.Stdout.Write(append(ping, '\n'))
+			}
 			result = toolsCallResult{Content: []struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
@@ -158,6 +169,13 @@ func fakeServerConfigInfinitePages() ServerConfig {
 	return ServerConfig{
 		Command: os.Args[0],
 		Env:     map[string]string{"CHISEL_MCP_FAKE_SERVER": "1", "CHISEL_MCP_FAKE_SERVER_INFINITE_PAGES": "1"},
+	}
+}
+
+func fakeServerConfigPingCollision() ServerConfig {
+	return ServerConfig{
+		Command: os.Args[0],
+		Env:     map[string]string{"CHISEL_MCP_FAKE_SERVER": "1", "CHISEL_MCP_FAKE_SERVER_PING_COLLISION": "1"},
 	}
 }
 
@@ -241,6 +259,34 @@ func TestServerCallTool(t *testing.T) {
 	}
 	if !strings.Contains(content, `"hello":"world"`) {
 		t.Errorf("content = %q, want it to echo the arguments", content)
+	}
+}
+
+// TestServerHandlesCollidingServerInitiatedPing is the regression test
+// for a real bug: response has no Method field, so a server-initiated
+// request (a "ping" is always legal, regardless of chisel's empty
+// declared capabilities) unmarshals as an ordinary response — if its ID
+// happens to collide with a pending call's own ID (likely, not exotic:
+// chisel's own counter starts at 1, exactly what a first call gets),
+// dispatch used to hand the call that ping as if it were its response,
+// reporting empty content as success while the real response — read
+// later — was silently dropped.
+func TestServerHandlesCollidingServerInitiatedPing(t *testing.T) {
+	s, err := Start("fake", fakeServerConfigPingCollision())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	content, isError, err := s.CallTool(context.Background(), "echo", json.RawMessage(`{"hello":"world"}`))
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if isError {
+		t.Error("isError = true, want false")
+	}
+	if !strings.Contains(content, `"hello":"world"`) {
+		t.Errorf("content = %q, want the real response, not the colliding ping mistaken for it", content)
 	}
 }
 

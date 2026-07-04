@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -241,6 +242,35 @@ func TestSaveThenLoadRoundTrip(t *testing.T) {
 	}
 	if decision, matched := Match(loaded, "bash", "npm test --watch"); !matched || decision != Allow {
 		t.Errorf("Match after Save+Load = (%v, %v), want (Allow, true)", decision, matched)
+	}
+}
+
+// TestSaveWritesAtomicallyNoLeftoverTempFile is the regression test for
+// a real robustness gap: Save wrote its file via a plain os.WriteFile,
+// unlike internal/session's Save and internal/trust's Trust (both
+// temp-file + rename) — a crash mid-write could leave a truncated,
+// corrupt permissions.json behind, silently dropping the user's
+// curated allow/deny policy on the next launch.
+func TestSaveWritesAtomicallyNoLeftoverTempFile(t *testing.T) {
+	workDir := t.TempDir()
+	cfg := Add(nil, "bash", "npm test*", Allow)
+
+	if err := Save(workDir, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	dir := filepath.Dir(ConfigPath(workDir))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("leftover temp file after Save: %s", e.Name())
+		}
+	}
+	if _, err := os.Stat(ConfigPath(workDir)); err != nil {
+		t.Errorf("expected the real permissions file to exist: %v", err)
 	}
 }
 

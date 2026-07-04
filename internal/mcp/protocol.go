@@ -20,9 +20,20 @@ type request struct {
 
 // response is a JSON-RPC 2.0 response. Exactly one of Result/Error is set
 // on any given response that carries an ID.
+//
+// Method is normally empty — set only when the decoded line turns out to
+// be a server-initiated request or notification instead, which shares
+// this same shape's ID field with no way to tell them apart except by
+// checking whether a "method" was present. Servers may legally send
+// their own requests (a "ping", regardless of chisel's empty declared
+// capabilities); without checking this, readLoop's dispatch would treat
+// one as an ordinary response and could hand it to whatever call
+// happens to be pending under the same ID — likely, not exotic, since
+// chisel's own request IDs start at 1.
 type response struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      int             `json:"id"`
+	Method  string          `json:"method,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *rpcError       `json:"error,omitempty"`
 }

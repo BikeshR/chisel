@@ -285,14 +285,41 @@ func (s *Server) readLoop(reader *bufio.Reader) {
 			s.failAllPending(fmt.Errorf("decode response: %w", err))
 			return
 		}
+		// A "method" present means this is a request or notification
+		// *from* the server, not a response to one of chisel's own
+		// calls — must not reach dispatch, which would otherwise treat
+		// it as a response to whatever call happens to be pending under
+		// the same ID. See response's own doc comment.
+		if resp.Method != "" {
+			s.handleServerMessage(resp)
+			continue
+		}
 		s.dispatch(resp)
 	}
 }
 
+// handleServerMessage answers a server-initiated request (chisel isn't
+// a full MCP client in this version, but a "ping" is always legal
+// regardless of the empty capabilities chisel declares, and a server
+// awaiting a pong may drop the connection if none ever comes) or drops
+// a notification (msg.ID == 0 — nothing expects a reply to one).
+// Anything else chisel doesn't support gets a proper JSON-RPC error
+// reply rather than silence, so a server actually waiting on a response
+// doesn't hang.
+func (s *Server) handleServerMessage(msg response) {
+	if msg.ID == 0 {
+		return
+	}
+	if msg.Method == "ping" {
+		_ = s.send(response{JSONRPC: "2.0", ID: msg.ID, Result: json.RawMessage("{}")})
+		return
+	}
+	_ = s.send(response{JSONRPC: "2.0", ID: msg.ID, Error: &rpcError{Code: -32601, Message: "method not found"}})
+}
+
 // dispatch hands resp to whichever call is waiting for its ID, if any —
-// chisel doesn't support server-initiated requests in this version, and
 // a response to a call that already timed out/was cancelled has no
-// listener left, so it's dropped in either case.
+// listener left, so it's dropped in that case.
 func (s *Server) dispatch(resp response) {
 	s.mu.Lock()
 	ch, ok := s.pending[resp.ID]

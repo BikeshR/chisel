@@ -464,17 +464,27 @@ func checkModel(ctx context.Context, client *agent.Client, name string) tea.Cmd 
 			return modelCheckResultMsg{model: name, err: err}
 		}
 
-		msg, _, err := agent.Drain(ch)
+		msg, usage, err := agent.Drain(ch)
 		if err != nil {
 			return modelCheckResultMsg{model: name, err: err}
 		}
-		return modelCheckResultMsg{model: name, reply: msg.Content}
+		return modelCheckResultMsg{model: name, reply: msg.Content, usage: usage}
 	}
 }
 
 func (m Model) handleModelCheckResult(msg modelCheckResultMsg) (tea.Model, tea.Cmd) {
 	m.endTurn()
 	m.state = stateInput
+	// A probe sends the full request shape (system prompt + entire tool
+	// set) through client.Clone, not a trivially small request — its
+	// real cost belongs in the running totals the same way
+	// handleCompactResult already counts its own equally-synthetic
+	// request, unconditionally: a request was made either way, and
+	// Drain never returns partial usage on error, so tokensIn/Out just
+	// add zero in that case.
+	m.tokensIn += msg.usage.InputTokens
+	m.tokensOut += msg.usage.OutputTokens
+	m.requestCount++
 	if msg.err != nil {
 		m.appendLine(errorStyle.Render(fmt.Sprintf("✗ %s: %s", msg.model, interruptibleErrorText(msg.err))))
 		return m, m.turnSettledCmd()
