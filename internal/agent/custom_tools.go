@@ -12,6 +12,7 @@ func buildTools() []Tool {
 		globTool(),
 		grepTool(),
 		subagentDispatchTool(),
+		updateTodosTool(),
 	}
 }
 
@@ -65,7 +66,7 @@ func editorTool() Tool {
 			Name: "str_replace_based_edit_tool",
 			Description: "View, create, and edit files. Commands: " +
 				"view (read a file, optionally a [start,end] line range, or list a directory), " +
-				"create (write a new file, backing up any existing one first), " +
+				"create (write a new file, or overwrite an existing one entirely), " +
 				"str_replace (replace exactly one occurrence of old_str with new_str — errors if old_str matches zero or more than once), " +
 				"insert (insert insert_text after line insert_line, 0 = start of file).",
 			Parameters: map[string]any{

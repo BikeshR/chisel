@@ -20,7 +20,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - inputHeight - 3 // input box + status bar + margin
+		m.recomputeViewportHeight()
 		m.textArea.SetWidth(msg.Width - 2)
 		// Re-wrap every entry to the new width — without this, the
 		// viewport's own hard truncation (not wrapping) at msg.Width
@@ -442,6 +442,14 @@ func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
 		m.appendLine(errorStyle.Render("  ✗ " + firstLine(interruptibleResultText(result.Content))))
 	} else {
 		m.appendLine(dimStyle.Render("  ✓ " + firstLine(result.Content)))
+		// Extracted from the call's own arguments, not result.Content —
+		// runUpdateTodos only returns a short confirmation string. Only
+		// on success: a call that failed validation shouldn't replace an
+		// otherwise-valid list with partial or malformed data.
+		if todos, ok := parseTodos(m.pendingUses[0]); ok {
+			m.todos = todos
+			m.recomputeViewportHeight()
+		}
 	}
 
 	m.pendingResults = append(m.pendingResults, result.ToMessage())

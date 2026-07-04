@@ -16,6 +16,11 @@ func (m Model) View() string {
 	b.WriteString(m.viewport.View())
 	b.WriteString("\n")
 
+	if todos := renderTodos(m.todos); todos != "" {
+		b.WriteString(todos)
+		b.WriteString("\n")
+	}
+
 	switch m.state {
 	case stateAwaitingPermission:
 		// The prompt itself was already appended to the transcript above;

@@ -90,6 +90,12 @@ type Model struct {
 	// stateInput, instead of being swallowed the way every keystroke
 	// while busy used to be.
 	queuedMessages []string
+	// todos is the model's current task checklist, replaced wholesale
+	// on every successful update_todos call (see parseTodos in todo.go)
+	// — rendered as a persistent block in View, not appended to the
+	// transcript, so it reads as a live status rather than a growing
+	// log of every intermediate state.
+	todos []agent.TodoItem
 
 	// streamLineIdx is the index into entries of the assistant line
 	// currently being built from streamed text deltas, or -1 if none is
@@ -270,6 +276,19 @@ func (m *Model) refreshAndMaybeStickToBottom() {
 	if stuck {
 		m.viewport.GotoBottom()
 	}
+}
+
+// recomputeViewportHeight sets the transcript viewport's height from
+// the current terminal size, minus the fixed input-box-and-status-bar
+// margin and however many lines the todo block currently needs — unlike
+// the input box, the todo block's height isn't fixed, so this has to be
+// redone whenever the todo list changes, not just on resize.
+func (m *Model) recomputeViewportHeight() {
+	extra := inputHeight + 3 // input box + status bar + margin
+	if n := len(m.todos); n > 0 {
+		extra += n + 1 // the todo block itself, plus the blank line separating it from the transcript
+	}
+	m.viewport.Height = m.height - extra
 }
 
 // syncMCPHealth checks for MCP servers that have newly gone broken

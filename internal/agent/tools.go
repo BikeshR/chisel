@@ -109,6 +109,12 @@ func Summarize(call ToolCall) string {
 		}
 		_ = json.Unmarshal(call.input(), &in)
 		return "subagent: " + in.Task
+	case "update_todos":
+		var in struct {
+			Todos []TodoItem `json:"todos"`
+		}
+		_ = json.Unmarshal(call.input(), &in)
+		return fmt.Sprintf("update todos (%d items)", len(in.Todos))
 	default:
 		return call.Function.Name
 	}
@@ -138,6 +144,8 @@ func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *Ba
 		content, err = runView(workDir, call.input())
 	case "dispatch_subagent":
 		content, usage, err = runDispatchSubagent(ctx, workDir, model, call.input())
+	case "update_todos":
+		content, err = runUpdateTodos(call.input())
 	default:
 		err = fmt.Errorf("unknown tool %q", call.Function.Name)
 	}
