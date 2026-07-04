@@ -14,7 +14,12 @@ go build -o chisel .
 Requires `CHISEL_API_KEY` (your OpenCode Go key) in the environment, or set
 it in `~/.chisel.env` (outside the repo, never committed) along with
 `CHISEL_MODEL` to pick a model. Chisel operates on the directory it's run
-from. Switch models anytime in-app with `/model`.
+from. Switch models anytime in-app with `/model`, or live-test one with
+`/model check [name]`.
+
+Conversations save automatically per working directory
+(`~/.chisel/sessions/`) and resume the next time you run chisel there;
+`/new` starts a fresh one.
 
 ## Development
 

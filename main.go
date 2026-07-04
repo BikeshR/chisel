@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/session"
 	"github.com/BikeshR/chisel/internal/tui"
 )
 
@@ -37,7 +38,8 @@ func main() {
 	bash := agent.NewBashSession(workDir)
 	defer bash.Close()
 
-	tuiModel := tui.New(client, workDir, bash)
+	resumed, savedAt, _ := session.Load(workDir)
+	tuiModel := tui.New(client, workDir, bash, resumed, savedAt)
 
 	if _, err := tea.NewProgram(tuiModel, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "chisel:", err)

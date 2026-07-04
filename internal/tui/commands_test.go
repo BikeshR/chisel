@@ -4,6 +4,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/session"
 )
 
 func TestHandleModelCheckResult(t *testing.T) {
@@ -35,4 +38,30 @@ func TestHandleModelCheckResult(t *testing.T) {
 			t.Errorf("lines = %+v, want a line mentioning the model and the error", gotModel.lines)
 		}
 	})
+}
+
+func TestHandleNewCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := "/home/brana/code/testproj"
+
+	if err := session.Save(workDir, []agent.Message{{Role: "user", Content: "old conversation"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := Model{
+		workDir:  workDir,
+		messages: []agent.Message{{Role: "user", Content: "old conversation"}},
+		lines:    []string{"you  old conversation"},
+	}
+	got := m.handleNewCommand()
+
+	if len(got.messages) != 0 {
+		t.Errorf("messages = %+v, want empty", got.messages)
+	}
+	if len(got.lines) != 1 || !strings.Contains(got.lines[0], "new session") {
+		t.Errorf("lines = %+v, want a single line announcing a new session", got.lines)
+	}
+	if _, _, ok := session.Load(workDir); ok {
+		t.Error("session.Load after /new: ok = true, want the saved session cleared")
+	}
 }

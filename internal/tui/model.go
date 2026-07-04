@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -9,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/session"
 )
 
 type state int
@@ -55,8 +57,9 @@ type Model struct {
 // New builds the initial Model for a chisel session rooted at workDir.
 // bash is owned by the caller (main.go), not created here, so its
 // lifecycle (in particular, closing the underlying shell on exit) doesn't
-// depend on anything inside this package.
-func New(client *agent.Client, workDir string, bash *agent.BashSession) Model {
+// depend on anything inside this package. resumed and savedAt come from
+// session.Load — pass a nil/zero pair if there's nothing to resume.
+func New(client *agent.Client, workDir string, bash *agent.BashSession, resumed []agent.Message, savedAt time.Time) Model {
 	ti := textinput.New()
 	ti.Placeholder = "ask chisel to do something…"
 	ti.Focus()
@@ -64,16 +67,26 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession) Model {
 
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 
-	return Model{
+	m := Model{
 		client:        client,
 		workDir:       workDir,
 		bash:          bash,
+		messages:      resumed,
 		textInput:     ti,
 		viewport:      viewport.New(80, 20),
 		spinner:       sp,
 		state:         stateInput,
 		streamLineIdx: -1,
 	}
+
+	if len(resumed) > 0 {
+		m.lines = append(m.lines, resumeBanner(len(resumed), savedAt))
+		m.lines = append(m.lines, renderHistory(resumed, m.showThinking)...)
+		m.viewport.SetContent(joinLines(m.lines))
+		m.viewport.GotoBottom()
+	}
+
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -121,5 +134,18 @@ func (m *Model) endStreamLine() {
 func executeTool(workDir string, bash *agent.BashSession, call agent.ToolCall) tea.Cmd {
 	return func() tea.Msg {
 		return toolResultMsg{result: agent.Execute(context.Background(), workDir, call, bash)}
+	}
+}
+
+// saveSession persists messages as the current session for workDir. A
+// failure here isn't fatal to the conversation itself, so it's reported
+// as a sessionSaveErrorMsg rather than surfaced through the normal
+// error-handling path.
+func saveSession(workDir string, messages []agent.Message) tea.Cmd {
+	return func() tea.Msg {
+		if err := session.Save(workDir, messages); err != nil {
+			return sessionSaveErrorMsg{err: err}
+		}
+		return nil
 	}
 }

@@ -20,3 +20,10 @@ type modelCheckResultMsg struct {
 	reply string
 	err   error
 }
+
+// sessionSaveErrorMsg reports that persisting the session to disk failed.
+// The conversation itself is unaffected — this is surfaced so silent data
+// loss (a session that fails to resume next time) isn't fully silent.
+type sessionSaveErrorMsg struct {
+	err error
+}

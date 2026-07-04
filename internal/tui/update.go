@@ -33,6 +33,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modelCheckResultMsg:
 		return m.handleModelCheckResult(msg)
 
+	case sessionSaveErrorMsg:
+		m.appendLine(errorStyle.Render("session save failed: " + msg.err.Error()))
+		return m, nil
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -96,7 +100,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.appendLine(userStyle.Render("you  ") + text)
 	m.state = stateWaitingModel
 
-	return m, tea.Batch(startStream(m.client, m.messages), textinput.Blink)
+	return m, tea.Batch(startStream(m.client, m.messages), saveSession(m.workDir, m.messages), textinput.Blink)
 }
 
 // handleStreamEvent processes one event from the in-flight response. While
@@ -132,13 +136,15 @@ func (m Model) handleStreamComplete(resp agent.Message, finishReason string, usa
 	m.tokensIn += usage.InputTokens
 	m.tokensOut += usage.OutputTokens
 	m.pendingUses = resp.ToolCalls
+	save := saveSession(m.workDir, m.messages)
 
 	if finishReason != "tool_calls" || len(m.pendingUses) == 0 {
 		m.state = stateInput
-		return m, nil
+		return m, save
 	}
 
-	return m.dispatchNextTool()
+	next, cmd := m.dispatchNextTool()
+	return next, tea.Batch(save, cmd)
 }
 
 // dispatchNextTool looks at the front of the pending tool-use queue and
@@ -178,7 +184,7 @@ func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
 	m.messages = append(m.messages, m.pendingResults...)
 	m.pendingResults = nil
 	m.state = stateWaitingModel
-	return m, startStream(m.client, m.messages)
+	return m, tea.Batch(startStream(m.client, m.messages), saveSession(m.workDir, m.messages))
 }
 
 func firstLine(s string) string {

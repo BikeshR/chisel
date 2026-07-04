@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/session"
 )
 
 // handleCommand processes a "/"-prefixed line from the input box instead of
@@ -21,6 +22,8 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 		return m.handleModelCommand(fields[1:])
 	case "/think":
 		return m.handleThinkCommand(), nil
+	case "/new":
+		return m.handleNewCommand(), nil
 	default:
 		m.appendLine(errorStyle.Render("unknown command: " + fields[0]))
 		return m, nil
@@ -37,6 +40,20 @@ func (m Model) handleThinkCommand() Model {
 	} else {
 		m.appendLine(dimStyle.Render("thinking blocks: hidden (for new messages)"))
 	}
+	return m
+}
+
+// handleNewCommand abandons the current transcript, in memory and on
+// disk, and starts fresh. Doesn't touch which model is selected or the
+// bash session's cd/env state — those aren't part of "the conversation".
+func (m Model) handleNewCommand() Model {
+	if err := session.Clear(m.workDir); err != nil {
+		m.appendLine(errorStyle.Render("failed to clear saved session: " + err.Error()))
+	}
+	m.messages = nil
+	m.lines = nil
+	m.viewport.SetContent("")
+	m.appendLine(dimStyle.Render("started a new session"))
 	return m
 }
 
