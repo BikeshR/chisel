@@ -167,6 +167,20 @@ func (m Model) handleStreamComplete(resp agent.Message, finishReason string, usa
 func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	call := m.pendingUses[0]
 
+	// Plan mode hard-denies anything that would otherwise need permission
+	// — not just a prompt-level instruction the model might ignore. A
+	// call that's already auto-allowed (glob, grep, editor view) is
+	// read-only by definition and stays allowed; that's the whole point
+	// of "read-only planning".
+	if needsPermission(call) && m.client.PlanMode() {
+		m.appendLine(errorStyle.Render("✗ blocked (plan mode): " + summarizeCall(call)))
+		return m.handleToolResult(agent.ToolResult{
+			ID:      call.ID,
+			Content: "Not run — chisel is in plan mode, which only allows read-only exploration. Describe this as part of your plan instead, then stop; the user will exit plan mode before you make any changes.",
+			IsError: true,
+		})
+	}
+
 	if needsPermission(call) {
 		m.state = stateAwaitingPermission
 		prompt := fmt.Sprintf("allow %s?  [y/n]", summarizeCall(call))

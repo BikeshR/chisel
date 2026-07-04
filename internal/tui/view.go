@@ -37,6 +37,12 @@ func (m Model) statusLine() string {
 	if m.lastContextTokens >= contextWarnThreshold {
 		context = errorStyle.Render(context + " — large, consider /compact")
 	}
-	return fmt.Sprintf(" %s · context %s · spent %s in / %s out · ctrl+c to quit",
-		m.client.ModelName(), context, formatTokenCount(m.tokensIn), formatTokenCount(m.tokensOut))
+
+	plan := ""
+	if m.client.PlanMode() {
+		plan = planModeStyle.Render("PLAN MODE") + " · "
+	}
+
+	return fmt.Sprintf(" %s%s · context %s · spent %s in / %s out · ctrl+c to quit",
+		plan, m.client.ModelName(), context, formatTokenCount(m.tokensIn), formatTokenCount(m.tokensOut))
 }

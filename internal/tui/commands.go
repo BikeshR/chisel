@@ -29,6 +29,8 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 		return m.handleGitCommand(fields[1:]), nil
 	case "/compact":
 		return m.handleCompactCommand()
+	case "/plan":
+		return m.handlePlanCommand(), nil
 	default:
 		m.appendLine(errorStyle.Render("unknown command: " + fields[0]))
 		return m, nil
@@ -44,6 +46,20 @@ func (m Model) handleThinkCommand() Model {
 		m.appendLine(dimStyle.Render("thinking blocks: shown (for new messages)"))
 	} else {
 		m.appendLine(dimStyle.Render("thinking blocks: hidden (for new messages)"))
+	}
+	return m
+}
+
+// handlePlanCommand toggles plan mode: the model is told (via the system
+// prompt) to only explore and present a plan, and any mutating tool call
+// it makes anyway is hard-denied at dispatch time regardless — see
+// dispatchNextTool in update.go. Off by default.
+func (m Model) handlePlanCommand() Model {
+	m.client.SetPlanMode(!m.client.PlanMode())
+	if m.client.PlanMode() {
+		m.appendLine(dimStyle.Render("plan mode: on — read-only exploration only; /plan again to exit and allow changes"))
+	} else {
+		m.appendLine(dimStyle.Render("plan mode: off"))
 	}
 	return m
 }

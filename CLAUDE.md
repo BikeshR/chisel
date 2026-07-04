@@ -117,3 +117,13 @@ full is the context window right now" — since every request resends the
 full history, summing across turns would double-count and isn't the
 number `/compact`'s warning threshold (`contextWarnThreshold`, `model.go`)
 should ever compare against.
+
+**Plan mode is enforced twice, at two different layers, and both matter.**
+`agent.Client.planMode` (`client.go`) only changes what the model is
+*told* — an extra system-prompt instruction to explore and propose rather
+than act. The actual guarantee is separate: `dispatchNextTool`
+(`internal/tui/update.go`) checks `m.client.PlanMode()` and hard-denies
+any call that would otherwise need permission, before it ever reaches the
+y/n prompt or `agent.Execute`. Don't rely on the system-prompt instruction
+alone for anything safety-relevant — a model can ignore it; it can't
+bypass the dispatch-layer check.

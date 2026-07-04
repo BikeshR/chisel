@@ -24,16 +24,27 @@ Use the available tools to read, search, and edit files, and to run shell comman
 
 When you're done, say so plainly and stop; don't ask what to do next unless the request was genuinely ambiguous.`
 
+// planModeNote is appended to the system prompt while plan mode is on.
+// It's an instruction, not the actual guarantee — any mutating tool call
+// the model makes anyway is hard-denied at dispatch time regardless of
+// what it says here (see internal/tui/model.go's dispatchNextTool), so a
+// model that ignores this can't actually do anything, it just wastes a
+// turn finding out.
+const planModeNote = `
+
+You are currently in PLAN MODE. Only use read-only exploration — viewing files, glob, grep, and inspection-only shell commands (ls, cat, grep, etc.) — to understand what's being asked. Do not attempt any file edit or state-changing command; those will be refused. Once you understand what's needed, present a clear, concise, numbered plan of the specific changes you'd make, then stop and wait — don't start making changes. The user will exit plan mode when they want you to proceed.`
+
 const defaultBaseURL = "https://opencode.ai/zen/go"
 
 // Client sends conversation turns to a single OpenCode Go model with
 // chisel's fixed tool set.
 type Client struct {
-	http    *http.Client
-	baseURL string
-	apiKey  string
-	model   string
-	tools   []Tool
+	http     *http.Client
+	baseURL  string
+	apiKey   string
+	model    string
+	tools    []Tool
+	planMode bool
 }
 
 // New builds a Client for the given model. Configured via CHISEL_API_KEY
@@ -65,6 +76,17 @@ func (c *Client) AddTools(tools []Tool) {
 	c.tools = append(c.tools, tools...)
 }
 
+// SetPlanMode toggles plan mode, which appends planModeNote to the system
+// prompt sent with every request from here on.
+func (c *Client) SetPlanMode(enabled bool) {
+	c.planMode = enabled
+}
+
+// PlanMode reports whether plan mode is currently on.
+func (c *Client) PlanMode() bool {
+	return c.planMode
+}
+
 type chatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
@@ -78,7 +100,11 @@ type chatRequest struct {
 // (status code, connection) is validated before this returns — only
 // decode-time failures arrive over the channel.
 func (c *Client) SendStreaming(ctx context.Context, history []Message) (<-chan Event, error) {
-	messages := append([]Message{{Role: "system", Content: systemPrompt}}, history...)
+	prompt := systemPrompt
+	if c.planMode {
+		prompt += planModeNote
+	}
+	messages := append([]Message{{Role: "system", Content: prompt}}, history...)
 
 	body, err := json.Marshal(chatRequest{
 		Model:    c.model,

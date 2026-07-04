@@ -29,6 +29,11 @@ cumulative token spend; past 100k tokens it'll suggest `/compact`, which
 asks the model to summarize the conversation so far and replaces the
 history with that summary.
 
+`/plan` toggles plan mode: the model is told to only explore and present
+a plan rather than make changes, and any mutating action it tries anyway
+is refused outright — not just discouraged by the prompt. `/plan` again
+to exit and allow changes.
+
 ## MCP servers
 
 List servers in `~/.chisel/mcp.json` — same `mcpServers` shape Claude
