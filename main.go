@@ -5,6 +5,8 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +30,9 @@ const defaultModel = "minimax-m3"
 func main() {
 	loadDotEnv()
 
+	prompt := flag.String("p", "", "run non-interactively: send this prompt, print the final answer, and exit — read-only tools only (no bash, no edits, no MCP), since there's no terminal here to show a permission prompt to")
+	flag.Parse()
+
 	// Checked here, not left to surface as the first request's raw 401 —
 	// that failure mode gives no indication of what's actually wrong,
 	// especially once it's buried behind a spinner and a stream error.
@@ -45,6 +50,11 @@ func main() {
 	model := defaultModel
 	if m := os.Getenv("CHISEL_MODEL"); m != "" {
 		model = m
+	}
+
+	if *prompt != "" {
+		runHeadless(workDir, model, *prompt)
+		return
 	}
 
 	client := agent.New(model)
@@ -81,6 +91,48 @@ func main() {
 		fmt.Fprintln(os.Stderr, "chisel:", err)
 		os.Exit(1)
 	}
+}
+
+// maxHeadlessTurns bounds chisel -p's own tool-calling loop — the same
+// safety net a subagent's loop has (see agent.RunLoop), since headless
+// mode reuses that exact loop and the same read-only tool set.
+const maxHeadlessTurns = 15
+
+// runHeadless is chisel -p: a non-interactive invocation for scripts
+// and CI. Prints the model's final answer to stdout and exits;
+// non-zero on any failure. Just a thin process-exiting wrapper around
+// runHeadlessCore, so a test can call that directly instead.
+func runHeadless(workDir, model, prompt string) {
+	answer, err := runHeadlessCore(workDir, model, prompt)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "chisel:", err)
+		os.Exit(1)
+	}
+	fmt.Println(answer)
+}
+
+// runHeadlessCore does the actual work for chisel -p. Restricted to
+// agent.ReadOnlyTools (glob, grep, view) — no bash, no edits, no MCP
+// tools (which always need permission) — since there's no terminal
+// here to show a permission prompt to, so nothing offered can need one
+// in the first place; the same guarantee a subagent's tool set gives,
+// reused via the same agent.RunLoop. Hooks aren't loaded either — the
+// interactive trust prompt they'd otherwise need doesn't make sense in
+// a non-interactive invocation.
+func runHeadlessCore(workDir, model, prompt string) (string, error) {
+	client := agent.New(model)
+	client.SetTools(agent.ReadOnlyTools())
+
+	if memContent, _, _ := memory.Load(workDir); memContent != "" {
+		client.SetMemory(memContent)
+	}
+
+	ctx := context.Background()
+	history := []agent.Message{{Role: "user", Content: prompt}}
+	answer, _, err := agent.RunLoop(ctx, client, history, maxHeadlessTurns, func(call agent.ToolCall) agent.ToolResult {
+		return agent.Execute(ctx, workDir, model, call, nil)
+	})
+	return answer, err
 }
 
 // agentToolsFromMCP converts MCP's own tool shape to agent.Tool — kept

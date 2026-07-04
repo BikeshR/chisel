@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,5 +153,87 @@ func TestConfirmHooksTrustRePromptsOnContentChange(t *testing.T) {
 	}
 	if confirmHooksTrustFrom(workDir, strings.NewReader("n\n")) {
 		t.Error("expected changed hooks content to require re-approval, not reuse the old trust")
+	}
+}
+
+func TestRunHeadlessCoreReturnsFinalAnswer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"the answer is 42\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	answer, err := runHeadlessCore(t.TempDir(), "minimax-m3", "what is the answer?")
+	if err != nil {
+		t.Fatalf("runHeadlessCore: %v", err)
+	}
+	if answer != "the answer is 42" {
+		t.Errorf("answer = %q, want %q", answer, "the answer is 42")
+	}
+}
+
+// TestRunHeadlessCoreUsesReadOnlyTools confirms headless mode's request
+// declares only the read-only tool set, not the full bash/edit set —
+// there's no terminal to show a permission prompt to in a
+// non-interactive invocation, so nothing offered can need one.
+func TestRunHeadlessCoreUsesReadOnlyTools(t *testing.T) {
+	var toolNames []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		_ = json.Unmarshal(body, &req)
+		for _, tool := range req.Tools {
+			toolNames = append(toolNames, tool.Function.Name)
+		}
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	if _, err := runHeadlessCore(t.TempDir(), "minimax-m3", "hi"); err != nil {
+		t.Fatalf("runHeadlessCore: %v", err)
+	}
+
+	for _, unwanted := range []string{"bash", "str_replace_based_edit_tool", "dispatch_subagent"} {
+		for _, name := range toolNames {
+			if name == unwanted {
+				t.Errorf("request declared tool %q, want it excluded from headless mode", unwanted)
+			}
+		}
+	}
+	found := false
+	for _, name := range toolNames {
+		if name == "glob" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("toolNames = %+v, want glob (a read-only tool) included", toolNames)
+	}
+}
+
+func TestRunHeadlessCorePropagatesError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	if _, err := runHeadlessCore(t.TempDir(), "minimax-m3", "hi"); err == nil {
+		t.Error("expected an error from a failing request")
 	}
 }

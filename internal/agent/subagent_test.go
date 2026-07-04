@@ -186,3 +186,61 @@ func TestSummarizeDispatchSubagent(t *testing.T) {
 		t.Errorf("Summarize = %q, want %q", got, want)
 	}
 }
+
+// TestRunLoopUsesCustomExecTool confirms RunLoop dispatches through
+// whatever execTool it's given, not just Execute against a real
+// workDir — headless mode (chisel -p, in main.go) relies on this to
+// supply its own dispatch rather than needing a workDir-bound Execute
+// call baked into the loop itself.
+func TestRunLoopUsesCustomExecTool(t *testing.T) {
+	toolCall := `[{"index":0,"id":"call_1","type":"function","function":{"name":"custom","arguments":"{}"}}]`
+	server, callCount := scriptedServer(t, []string{
+		sseChunk("", "tool_calls", toolCall),
+		sseChunk("done", "stop", ""),
+	})
+	defer server.Close()
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	client := New("minimax-m3")
+	var dispatched []string
+	execTool := func(call ToolCall) ToolResult {
+		dispatched = append(dispatched, call.Function.Name)
+		return ToolResult{ID: call.ID, Content: "custom result"}
+	}
+
+	answer, usage, err := RunLoop(context.Background(), client, []Message{{Role: "user", Content: "go"}}, 5, execTool)
+	if err != nil {
+		t.Fatalf("RunLoop: %v", err)
+	}
+	if answer != "done" {
+		t.Errorf("answer = %q, want %q", answer, "done")
+	}
+	if len(dispatched) != 1 || dispatched[0] != "custom" {
+		t.Errorf("dispatched = %+v, want exactly one call to the custom tool", dispatched)
+	}
+	if *callCount != 2 {
+		t.Errorf("expected 2 requests (one tool round trip), got %d", *callCount)
+	}
+	if usage.InputTokens != 200 || usage.OutputTokens != 40 {
+		t.Errorf("usage = %+v, want 200/40 accumulated across both turns", usage)
+	}
+}
+
+func TestReadOnlyToolsMatchesExpectedSet(t *testing.T) {
+	tools := ReadOnlyTools()
+	names := map[string]bool{}
+	for _, tool := range tools {
+		names[tool.Function.Name] = true
+	}
+	for _, want := range []string{"glob", "grep", "view"} {
+		if !names[want] {
+			t.Errorf("ReadOnlyTools missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{"bash", "str_replace_based_edit_tool", "dispatch_subagent"} {
+		if names[unwanted] {
+			t.Errorf("ReadOnlyTools unexpectedly includes %q", unwanted)
+		}
+	}
+}

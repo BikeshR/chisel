@@ -21,6 +21,15 @@ func subagentTools() []Tool {
 	return []Tool{globTool(), grepTool(), viewTool()}
 }
 
+// ReadOnlyTools is subagentTools, exported for headless mode (chisel
+// -p): a non-interactive invocation has no terminal to show a
+// permission prompt to, so it needs the same guarantee a subagent
+// relies on — a tool set that's incapable of mutating anything, by
+// construction, rather than one that merely asks first.
+func ReadOnlyTools() []Tool {
+	return subagentTools()
+}
+
 func viewTool() Tool {
 	return Tool{
 		Type: "function",
@@ -87,17 +96,31 @@ func RunSubagent(ctx context.Context, workDir, model, task string) (string, Usag
 	client.tools = subagentTools()
 
 	history := []Message{{Role: "user", Content: subagentTaskPrompt(task)}}
+	return RunLoop(ctx, client, history, maxSubagentTurns, func(call ToolCall) ToolResult {
+		return Execute(ctx, workDir, model, call, nil) // subagentTools never dispatches to bash
+	})
+}
+
+// RunLoop runs a synchronous send/dispatch loop: send history to
+// client, and for each tool call the model makes in response, invoke
+// execTool and feed its result back, until the model responds with no
+// more tool calls or maxTurns is exceeded. Returns the model's final
+// answer and its accumulated token usage across every turn. Shared by
+// RunSubagent (execTool restricted to a fixed, read-only tool set with
+// no permission gate) and headless mode (chisel -p, in main.go), which
+// supplies its own tool set and dispatch function instead.
+func RunLoop(ctx context.Context, client *Client, history []Message, maxTurns int, execTool func(ToolCall) ToolResult) (string, Usage, error) {
 	var total Usage
 
-	for turn := 1; turn <= maxSubagentTurns; turn++ {
+	for turn := 1; turn <= maxTurns; turn++ {
 		ch, err := client.SendStreaming(ctx, history)
 		if err != nil {
-			return "", total, fmt.Errorf("subagent turn %d: %w", turn, err)
+			return "", total, fmt.Errorf("turn %d: %w", turn, err)
 		}
 
 		msg, usage, err := Drain(ch)
 		if err != nil {
-			return "", total, fmt.Errorf("subagent turn %d: %w", turn, err)
+			return "", total, fmt.Errorf("turn %d: %w", turn, err)
 		}
 		total.InputTokens += usage.InputTokens
 		total.OutputTokens += usage.OutputTokens
@@ -112,12 +135,12 @@ func RunSubagent(ctx context.Context, workDir, model, task string) (string, Usag
 		}
 
 		for _, call := range msg.ToolCalls {
-			result := Execute(ctx, workDir, model, call, nil) // subagentTools never dispatches to bash
+			result := execTool(call)
 			history = append(history, result.ToMessage())
 		}
 	}
 
-	return "", total, fmt.Errorf("subagent did not finish within %d turns", maxSubagentTurns)
+	return "", total, fmt.Errorf("did not finish within %d turns", maxTurns)
 }
 
 func subagentTaskPrompt(task string) string {

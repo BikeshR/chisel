@@ -63,3 +63,16 @@ func TestRemoveToolsWithPrefix(t *testing.T) {
 		t.Error("a tool from a different server was incorrectly removed")
 	}
 }
+
+func TestSetToolsReplacesOutright(t *testing.T) {
+	c := New("minimax-m3")
+	if len(c.tools) == 0 {
+		t.Fatal("expected New to populate built-in tools")
+	}
+
+	c.SetTools([]Tool{{Type: "function", Function: ToolFunction{Name: "only-this-one"}}})
+
+	if len(c.tools) != 1 || c.tools[0].Function.Name != "only-this-one" {
+		t.Errorf("tools = %+v, want SetTools to replace the set outright", c.tools)
+	}
+}

@@ -101,6 +101,15 @@ func (c *Client) AddTools(tools []Tool) {
 	c.tools = append(c.tools, tools...)
 }
 
+// SetTools replaces the tool set sent with future requests outright —
+// unlike AddTools, which appends to whatever New already set up via
+// buildTools. Used by headless mode (chisel -p) to restrict to
+// ReadOnlyTools: a non-interactive invocation has no terminal to show a
+// permission prompt to, so nothing offered can need one in the first place.
+func (c *Client) SetTools(tools []Tool) {
+	c.tools = tools
+}
+
 // RemoveToolsWithPrefix drops every tool whose name starts with prefix
 // from the set sent with future requests — used once an MCP server is
 // discovered to be broken (see mcp.Server, whose tools are all named
