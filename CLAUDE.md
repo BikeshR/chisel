@@ -82,16 +82,26 @@ with no permission prompt. Both now filter every candidate path through
 files by any path chisel didn't construct itself, assume it needs the
 same check.
 
-**Permission gating is name- and command-based, not path-based.**
-`agent.NeedsPermission` (`tools.go`) hardcodes: `bash` always needs
-confirmation; `str_replace_based_edit_tool` needs it unless the parsed
-`command` field is `"view"`; everything else (`glob`, `grep`) is
-auto-allowed. It inspects the tool call's arguments directly, not the
-result of running it. `internal/tui/model.go`'s `needsPermission` wraps
-this with one more rule before delegating: any `mcp__`-prefixed call
-always needs permission, since chisel has no way to know what an
-arbitrary MCP server's tool actually does — that rule lives in `tui`, not
-`agent` (see below for why).
+**Permission gating is name- and command-based, not path-based, and
+centralized behind one decision function.** `agent.NeedsPermission`
+(`tools.go`) hardcodes: `bash` always needs confirmation;
+`str_replace_based_edit_tool` needs it unless the parsed `command` field
+is `"view"`; everything else (`glob`, `grep`) is auto-allowed. It
+inspects the tool call's arguments directly, not the result of running
+it. `internal/tui/permission.go`'s `decidePermission` is the one place
+that turns this (plus the MCP-always-asks rule, plus plan mode's
+hard-deny, plus the session allowlist from "always allow") into a single
+`allow | ask | deny(reason)` outcome — this used to be four independent
+checks scattered across `tui` with three different rendering styles for
+"this was refused," found and unified in a repo-wide review. preToolUse
+hooks are deliberately *not* part of this decision function even
+though they can also block a call: a hook is an arbitrary shell command
+that can take real time, so it has to run inside the same async `Cmd`
+that executes the tool call (`executeTool`, `model.go`), not a
+synchronous check made before the permission prompt appears the way the
+rest of this decision is. If you're adding a new reason a call might not
+run, it almost certainly belongs in `decidePermission`, not as a fifth
+scattered check.
 
 **`internal/mcp` doesn't import `internal/agent`, on purpose.** It would
 be the natural place to return `[]agent.Tool` directly from
@@ -114,6 +124,23 @@ field — are handled in `internal/tui/think.go`'s `renderAssistantText`,
 which re-scans the full accumulated text on every render rather than
 tracking incremental parse state (so a tag split across two streamed
 chunks is handled for free, at the cost of re-scanning on every delta).
+
+**The transcript stores raw entries, not pre-rendered strings — render
+at display time, not append time.** `internal/tui/transcript.go`'s
+`entry` type holds either an already-styled string (most lines) or, for
+assistant text specifically, the raw unstyled content plus a flag —
+`entry.render(showThinking)` decides collapsed-vs-expanded on every
+call, and `Model.transcriptContent()` re-wraps every entry to the
+current terminal width on every call, both from the same stored data.
+This replaced a `[]string` where styling and wrapping were baked in the
+moment a line was appended, which made re-wrapping on resize and
+`/think` re-rendering *past* messages both impossible — there was
+nothing left to re-derive them from. If you're adding a new kind of
+transcript line, give it an `entry` (styled string, or raw+isAssistant),
+not a pre-rendered one appended straight into a slice — anything
+rendered once and frozen at append time will hit the same wall the next
+time the display needs to react to something (a resize, a toggle) after
+the fact.
 
 **Two different token counters answer two different questions — don't
 merge them.** `Model.tokensIn`/`tokensOut` (`update.go`) are a running sum
