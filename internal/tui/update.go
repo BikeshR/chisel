@@ -374,6 +374,7 @@ func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage, finis
 	m.messages = append(m.messages, resp)
 	m.tokensIn += usage.InputTokens
 	m.tokensOut += usage.OutputTokens
+	m.requestCount++
 	m.lastContextTokens = usage.InputTokens
 	if finishReason == "length" {
 		m.appendLine(dimStyle.Render("(response truncated — hit the model's length limit)"))
@@ -507,6 +508,9 @@ func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
 	// multi-turn on its own, never showed up in the status bar's totals.
 	m.tokensIn += result.Usage.InputTokens
 	m.tokensOut += result.Usage.OutputTokens
+	if result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0 {
+		m.requestCount++ // a dispatch_subagent call — undercounts its own internal multi-turn requests, see requestCount's doc comment
+	}
 
 	if result.IsError {
 		m.appendLine(errorStyle.Render("  ✗ " + firstLine(interruptibleResultText(result.Content))))

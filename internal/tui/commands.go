@@ -38,6 +38,8 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 		return m.handleRetryCommand()
 	case "/status":
 		return m.handleStatusCommand(), nil
+	case "/usage":
+		return m.handleUsageCommand(), nil
 	case "/rewind":
 		return m.handleRewindCommand(fields[1:]), nil
 	case "/help":
@@ -82,6 +84,7 @@ const helpText = `commands:
   /git auto [on|off]    toggle auto-commit after each turn
   /plan                 toggle plan mode (read-only exploration only)
   /status               show workdir, session, hooks, MCP, and memory info
+  /usage                show session token/request counts
   /rewind [n]           list checkpoints, or restore code+conversation to checkpoint n
 
 keys:
@@ -164,6 +167,31 @@ func (m Model) handleStatusCommand() Model {
 		m.appendLine(dimStyle.Render("skills: none loaded"))
 	}
 
+	return m
+}
+
+// handleUsageCommand reports session-cumulative token and request
+// counts — deliberately not a dollar estimate against OpenCode Go's
+// hard usage caps ($12/5hr, $30/week, $60/month; see docs/design.md
+// §4), even though that would be the more directly useful number.
+// Verified directly against the live API before building this: every
+// response's own "cost" field (a trailing SSE frame after [DONE]) reads
+// "0" regardless of request size, and there's no separate account/usage
+// endpoint either — this subscription just doesn't expose real dollar
+// cost data to estimate spend from. Claiming a specific dollar figure
+// with no reliable source for it would be worse than not claiming one
+// at all, the same reasoning chisel already applies to not maintaining
+// a per-model context-window table.
+func (m Model) handleUsageCommand() Model {
+	var b strings.Builder
+	b.WriteString("session usage:\n")
+	fmt.Fprintf(&b, "  requests:    %d\n", m.requestCount)
+	fmt.Fprintf(&b, "  tokens in:   %s\n", formatTokenCount(m.tokensIn))
+	fmt.Fprintf(&b, "  tokens out:  %s\n", formatTokenCount(m.tokensOut))
+	fmt.Fprintf(&b, "  context now: %s tok\n\n", formatTokenCount(m.lastContextTokens))
+	b.WriteString("OpenCode Go enforces hard usage caps ($12/5hr, $30/week, $60/month) but its API doesn't expose real dollar cost for this subscription — every response's own cost field reads \"0\" regardless of size, verified directly. Check opencode.ai's own dashboard for actual remaining budget.")
+
+	m.appendLine(dimStyle.Render(b.String()))
 	return m
 }
 
@@ -339,6 +367,7 @@ func (m Model) handleCompactResult(msg compactResultMsg) (tea.Model, tea.Cmd) {
 	m.state = stateInput
 	m.tokensIn += msg.usage.InputTokens
 	m.tokensOut += msg.usage.OutputTokens
+	m.requestCount++
 
 	if msg.err != nil {
 		m.appendLine(errorStyle.Render("compact failed: " + interruptibleErrorText(msg.err)))

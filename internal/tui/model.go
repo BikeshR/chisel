@@ -151,6 +151,15 @@ type Model struct {
 	preTurnDirty map[string]bool
 
 	tokensIn, tokensOut int64
+	// requestCount counts real API round-trips this session — a normal
+	// turn, a /compact, or a dispatch_subagent call (undercounted
+	// slightly for the last one: a subagent can make several internal
+	// requests bundled into the one Usage value its caller sees, so
+	// this counts that as one). See handleUsageCommand — shown alongside
+	// tokensIn/tokensOut rather than a dollar estimate, since OpenCode
+	// Go's subscription doesn't expose real cost data to estimate one
+	// from (see /usage's own doc comment).
+	requestCount int64
 	// lastContextTokens is the prompt size of the most recent request —
 	// unlike tokensIn (a running total across every request this session,
 	// for cost tracking), this is "how full is the context window right
