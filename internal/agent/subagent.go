@@ -97,7 +97,7 @@ func RunSubagent(ctx context.Context, workDir, model, task string) (string, Usag
 
 	history := []Message{{Role: "user", Content: subagentTaskPrompt(task)}}
 	return RunLoop(ctx, client, history, maxSubagentTurns, func(call ToolCall) ToolResult {
-		return Execute(ctx, workDir, model, call, nil) // subagentTools never dispatches to bash
+		return Execute(ctx, workDir, model, call, nil, nil) // subagentTools never dispatches to bash or load_skill
 	})
 }
 

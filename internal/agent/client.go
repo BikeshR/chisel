@@ -14,8 +14,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/BikeshR/chisel/internal/skill"
 )
 
 const systemPrompt = `You are chisel, a terminal coding agent running in the user's project directory.
@@ -46,6 +49,11 @@ type Client struct {
 	tools    []Tool
 	planMode bool
 	memory   string
+	// skillsPrompt is the pre-formatted "available skills" section built
+	// by SetSkills — just names and descriptions, never full skill
+	// content, which stays out of every request until load_skill is
+	// actually called for one.
+	skillsPrompt string
 }
 
 // New builds a Client for the given model. Configured via CHISEL_API_KEY
@@ -172,6 +180,33 @@ func (c *Client) SetMemory(text string) {
 	c.memory = text
 }
 
+// SetSkills tells the model what skills (see internal/skill) are
+// available — just their names and descriptions, appended to the
+// system prompt, not their full content: that stays out of every
+// request until the model actually calls load_skill for one. A no-op
+// for an empty map. Also adds load_skill to the tool set, so it's only
+// ever offered when there's at least one skill to load.
+func (c *Client) SetSkills(skills map[string]skill.Skill) {
+	if len(skills) == 0 {
+		return
+	}
+
+	names := make([]string, 0, len(skills))
+	for name := range skills {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteString("Available skills — call load_skill with a name below to pull in its full instructions when it's relevant to what you're doing:\n")
+	for _, name := range names {
+		fmt.Fprintf(&b, "- %s: %s\n", name, skills[name].Description)
+	}
+	c.skillsPrompt = strings.TrimRight(b.String(), "\n")
+
+	c.AddTools([]Tool{loadSkillTool()})
+}
+
 type chatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
@@ -191,6 +226,9 @@ func (c *Client) SendStreaming(ctx context.Context, history []Message) (<-chan E
 	}
 	if c.memory != "" {
 		prompt += "\n\n---\n\nProject and user instructions:\n\n" + c.memory
+	}
+	if c.skillsPrompt != "" {
+		prompt += "\n\n---\n\n" + c.skillsPrompt
 	}
 	messages := append([]Message{{Role: "system", Content: prompt}}, history...)
 

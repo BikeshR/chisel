@@ -12,6 +12,7 @@ import (
 	"github.com/BikeshR/chisel/internal/customcmd"
 	"github.com/BikeshR/chisel/internal/gitutil"
 	"github.com/BikeshR/chisel/internal/session"
+	"github.com/BikeshR/chisel/internal/skill"
 )
 
 // handleCommand processes a "/"-prefixed line from the input box instead of
@@ -154,6 +155,12 @@ func (m Model) handleStatusCommand() Model {
 		m.appendLine(dimStyle.Render("memory: " + memoryBannerText(m.memUser, m.memProject)))
 	} else {
 		m.appendLine(dimStyle.Render("memory: none loaded"))
+	}
+
+	if names := skill.Names(m.skills); len(names) > 0 {
+		m.appendLine(dimStyle.Render("skills: " + strings.Join(names, ", ")))
+	} else {
+		m.appendLine(dimStyle.Render("skills: none loaded"))
 	}
 
 	return m

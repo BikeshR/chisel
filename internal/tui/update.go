@@ -104,7 +104,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			call := m.pendingUses[0]
 			m.state = stateExecutingTool
 			m.appendLine(dimStyle.Render("  → approved"))
-			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, call)
+			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, m.skills, call)
 		case "a", "A":
 			call := m.pendingUses[0]
 			if key, ok := allowlistKey(call); ok {
@@ -115,7 +115,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.state = stateExecutingTool
 			m.appendLine(dimStyle.Render("  → approved (always allow for this session)"))
-			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, call)
+			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, m.skills, call)
 		case "n", "N":
 			// Denying isn't a dead end: rather than immediately resending
 			// a canned "denied" message and letting the model guess why,
@@ -432,7 +432,7 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	default: // permissionAllow
 		m.state = stateExecutingTool
 		m.appendLine(toolStyle.Render("  " + summarizeCall(call)))
-		return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, call)
+		return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, m.skills, call)
 	}
 }
 

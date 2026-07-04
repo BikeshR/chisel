@@ -135,8 +135,8 @@ func TestResolveInWorkDirSymlinkEscape(t *testing.T) {
 
 func TestTruncateOutputLeavesShortContentUnchanged(t *testing.T) {
 	short := "hello world"
-	if got := truncateOutput(short); got != short {
-		t.Errorf("truncateOutput(%q) = %q, want unchanged", short, got)
+	if got := TruncateOutput(short); got != short {
+		t.Errorf("TruncateOutput(%q) = %q, want unchanged", short, got)
 	}
 }
 
@@ -145,9 +145,9 @@ func TestTruncateOutputCutsAtRuneBoundary(t *testing.T) {
 	// maxToolOutputChars could land mid-character and produce invalid
 	// UTF-8; this confirms the cut is rune-based instead.
 	long := strings.Repeat("é", maxToolOutputChars+100)
-	got := truncateOutput(long)
+	got := TruncateOutput(long)
 	if !utf8.ValidString(got) {
-		t.Fatal("truncateOutput produced invalid UTF-8")
+		t.Fatal("TruncateOutput produced invalid UTF-8")
 	}
 	if !strings.Contains(got, "truncated") {
 		t.Errorf("got = %q, want a truncation marker", got[len(got)-60:])

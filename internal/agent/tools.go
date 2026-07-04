@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/BikeshR/chisel/internal/skill"
 )
 
 // ToolCall is one function call the model made — the same shape whether
@@ -115,6 +117,12 @@ func Summarize(call ToolCall) string {
 		}
 		_ = json.Unmarshal(call.input(), &in)
 		return fmt.Sprintf("update todos (%d items)", len(in.Todos))
+	case "load_skill":
+		var in struct {
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(call.input(), &in)
+		return "load skill: " + in.Name
 	default:
 		return call.Function.Name
 	}
@@ -125,8 +133,10 @@ func Summarize(call ToolCall) string {
 // the given persistent session (nil is only valid if the call can't
 // possibly be "bash" — every real caller should pass a live session).
 // model is only used by dispatch_subagent, to run the child with the same
-// model as the parent.
-func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *BashSession) ToolResult {
+// model as the parent. skills is only used by load_skill — nil is only
+// valid if no skills were loaded (skill.Load never returns nil, so in
+// practice this is only nil in tests that don't care about load_skill).
+func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *BashSession, skills map[string]skill.Skill) ToolResult {
 	var content string
 	var usage Usage
 	var err error
@@ -146,6 +156,8 @@ func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *Ba
 		content, usage, err = runDispatchSubagent(ctx, workDir, model, call.input())
 	case "update_todos":
 		content, err = runUpdateTodos(call.input())
+	case "load_skill":
+		content, err = runLoadSkill(skills, call.input())
 	default:
 		err = fmt.Errorf("unknown tool %q", call.Function.Name)
 	}
@@ -153,7 +165,7 @@ func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *Ba
 	if err != nil {
 		return ToolResult{ID: call.ID, Content: err.Error(), IsError: true, Usage: usage}
 	}
-	return ToolResult{ID: call.ID, Content: truncateOutput(content), Usage: usage}
+	return ToolResult{ID: call.ID, Content: TruncateOutput(content), Usage: usage}
 }
 
 // maxToolOutputChars caps how much text a single tool result can carry
@@ -165,11 +177,14 @@ func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *Ba
 // until /compact or /new.
 const maxToolOutputChars = 40_000
 
-// truncateOutput cuts s to at most maxToolOutputChars runes, appending a
+// TruncateOutput cuts s to at most maxToolOutputChars runes, appending a
 // marker noting how much was cut. Rune-based, not byte-based, so a
 // multi-byte UTF-8 character is never split mid-sequence — see
 // tui.truncateRunes for the same reasoning applied on the display side.
-func truncateOutput(s string) string {
+// Exported so callers that build tool-shaped content without going
+// through Execute (background tasks, run outside the normal synchronous
+// dispatch path) can apply the same cap.
+func TruncateOutput(s string) string {
 	runes := []rune(s)
 	if len(runes) <= maxToolOutputChars {
 		return s

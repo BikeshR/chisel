@@ -22,6 +22,7 @@ import (
 	"github.com/BikeshR/chisel/internal/mcp"
 	"github.com/BikeshR/chisel/internal/memory"
 	"github.com/BikeshR/chisel/internal/session"
+	"github.com/BikeshR/chisel/internal/skill"
 	"github.com/BikeshR/chisel/internal/tui"
 )
 
@@ -92,7 +93,9 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "chisel: checkpoints unavailable:", err)
 	}
-	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, memUser, memProject, customCommands, checkpointStore, resumed, savedAt)
+	skills := skill.Load(workDir)
+	client.SetSkills(skills)
+	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, memUser, memProject, customCommands, checkpointStore, skills, resumed, savedAt)
 
 	if _, err := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "chisel:", err)
@@ -137,7 +140,7 @@ func runHeadlessCore(workDir, model, prompt string) (string, error) {
 	ctx := context.Background()
 	history := []agent.Message{{Role: "user", Content: prompt}}
 	answer, _, err := agent.RunLoop(ctx, client, history, maxHeadlessTurns, func(call agent.ToolCall) agent.ToolResult {
-		return agent.Execute(ctx, workDir, model, call, nil)
+		return agent.Execute(ctx, workDir, model, call, nil, nil)
 	})
 	return answer, err
 }

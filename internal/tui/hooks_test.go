@@ -9,6 +9,7 @@ import (
 
 	"github.com/BikeshR/chisel/internal/agent"
 	"github.com/BikeshR/chisel/internal/hooks"
+	"github.com/BikeshR/chisel/internal/skill"
 )
 
 func TestToolPath(t *testing.T) {
@@ -39,7 +40,7 @@ func TestExecuteToolBlockedByPreHook(t *testing.T) {
 		Arguments: `{"command":"str_replace","path":"protected.go","old_str":"package main","new_str":"package other"}`,
 	}}
 
-	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, call)
 	msg := cmd()
 
 	result, ok := msg.(toolResultMsg)
@@ -79,7 +80,7 @@ func TestExecuteToolAllowedByPreHook(t *testing.T) {
 		Arguments: `{"command":"str_replace","path":"a.go","old_str":"package main","new_str":"package other"}`,
 	}}
 
-	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, call)
 	result := cmd().(toolResultMsg).result
 	if result.IsError {
 		t.Fatalf("call was blocked unexpectedly: %s", result.Content)
@@ -102,7 +103,7 @@ func TestExecuteToolPostHookOutputAppended(t *testing.T) {
 		Arguments: `{"command":"str_replace","path":"a.go","old_str":"package main","new_str":"package other"}`,
 	}}
 
-	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, call)
 	result := cmd().(toolResultMsg).result
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content)
@@ -126,12 +127,33 @@ func TestExecuteToolPostHookSkippedOnFailure(t *testing.T) {
 		Arguments: `{"command":"str_replace","path":"nonexistent.go","old_str":"x","new_str":"y"}`,
 	}}
 
-	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, call)
 	result := cmd().(toolResultMsg).result
 	if !result.IsError {
 		t.Fatal("expected the edit itself to fail (file doesn't exist)")
 	}
 	if strings.Contains(result.Content, "should-not-appear") {
 		t.Error("post-hook ran despite the tool call failing")
+	}
+}
+
+func TestExecuteToolThreadsSkillsToLoadSkill(t *testing.T) {
+	dir := t.TempDir()
+	skills := map[string]skill.Skill{
+		"go-review": {Name: "go-review", Content: "Check for unchecked errors."},
+	}
+
+	call := agent.ToolCall{ID: "call_1", Function: agent.ToolCallFunction{
+		Name:      "load_skill",
+		Arguments: `{"name":"go-review"}`,
+	}}
+
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooks.Config{}, skills, call)
+	result := cmd().(toolResultMsg).result
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if result.Content != "Check for unchecked errors." {
+		t.Errorf("content = %q, want the skill's content", result.Content)
 	}
 }

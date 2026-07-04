@@ -20,6 +20,7 @@ import (
 	"github.com/BikeshR/chisel/internal/hooks"
 	"github.com/BikeshR/chisel/internal/mcp"
 	"github.com/BikeshR/chisel/internal/session"
+	"github.com/BikeshR/chisel/internal/skill"
 )
 
 // inputHeight is how many rows the multi-line input box shows — fixed
@@ -58,6 +59,12 @@ type Model struct {
 	// see handleCommand's default case, which checks here before
 	// reporting a command as unknown.
 	customCommands map[string]customcmd.Command
+	// skills are user-defined skill files loaded at startup
+	// (~/.chisel/skills/*.md and <workDir>/.chisel/skills/*.md) —
+	// threaded into agent.Execute so the load_skill tool can look one
+	// up by name. Names+descriptions also went to the client via
+	// SetSkills before this Model was ever built, for the system prompt.
+	skills map[string]skill.Skill
 
 	messages []agent.Message
 	entries  []entry // transcript, newest last — see transcript.go
@@ -187,7 +194,11 @@ func interruptibleErrorText(err error) string {
 // just means no custom commands are available. checkpointStore comes
 // from checkpoint.Open — nil is fine and just means /rewind reports
 // checkpoints as unavailable rather than chisel refusing to start.
-func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, customCommands map[string]customcmd.Command, checkpointStore *checkpoint.Store, resumed []agent.Message, savedAt time.Time) Model {
+// skills comes from skill.Load — a nil/empty map is fine and just means
+// load_skill has nothing to find. Callers should also have already
+// passed the same map to client.SetSkills before constructing here, so
+// the system prompt and the tool's actual lookup stay in sync.
+func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, customCommands map[string]customcmd.Command, checkpointStore *checkpoint.Store, skills map[string]skill.Skill, resumed []agent.Message, savedAt time.Time) Model {
 	ta := textarea.New()
 	ta.Placeholder = "ask chisel to do something… (alt+enter for a new line, @path to reference a file, /help for commands)"
 	ta.Focus()
@@ -215,6 +226,7 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 		memProject:      memProject,
 		customCommands:  customCommands,
 		checkpointStore: checkpointStore,
+		skills:          skills,
 		messages:        resumed,
 		textArea:        ta,
 		viewport:        vp,
@@ -349,7 +361,7 @@ func (m *Model) endStreamLine() {
 // approved via the permission prompt, rather than pre-empting the prompt
 // entirely — accepted for the simplicity of not needing a second async
 // round-trip before every permission decision.
-func executeTool(ctx context.Context, workDir, model string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, call agent.ToolCall) tea.Cmd {
+func executeTool(ctx context.Context, workDir, model string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, skills map[string]skill.Skill, call agent.ToolCall) tea.Cmd {
 	return func() tea.Msg {
 		path := toolPath(call)
 
@@ -371,7 +383,7 @@ func executeTool(ctx context.Context, workDir, model string, bash *agent.BashSes
 				result = agent.ToolResult{ID: call.ID, Content: content, IsError: isError}
 			}
 		} else {
-			result = agent.Execute(ctx, workDir, model, call, bash)
+			result = agent.Execute(ctx, workDir, model, call, bash, skills)
 		}
 
 		if !result.IsError {
