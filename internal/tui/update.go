@@ -37,6 +37,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendLine(errorStyle.Render("session save failed: " + msg.err.Error()))
 		return m, nil
 
+	case autoCommitResultMsg:
+		if msg.err != nil {
+			m.appendLine(errorStyle.Render("auto-commit failed: " + msg.err.Error()))
+		} else if msg.sha != "" {
+			m.appendLine(dimStyle.Render("→ committed " + msg.sha))
+		}
+		return m, nil
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -140,6 +148,9 @@ func (m Model) handleStreamComplete(resp agent.Message, finishReason string, usa
 
 	if finishReason != "tool_calls" || len(m.pendingUses) == 0 {
 		m.state = stateInput
+		if m.autoCommit {
+			return m, tea.Batch(save, autoCommit(m.workDir, lastUserText(m.messages)))
+		}
 		return m, save
 	}
 
@@ -154,7 +165,11 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 
 	if agent.NeedsPermission(call) {
 		m.state = stateAwaitingPermission
-		m.appendLine(permissionStyle.Render(fmt.Sprintf("allow %s?  [y/n]", agent.Summarize(call))))
+		prompt := fmt.Sprintf("allow %s?  [y/n]", agent.Summarize(call))
+		if diff, ok := agent.PreviewEdit(m.workDir, call); ok {
+			prompt = fmt.Sprintf("allow %s?\n\n%s\n[y/n]", agent.Summarize(call), strings.TrimRight(diff, "\n"))
+		}
+		m.appendLine(permissionStyle.Render(prompt))
 		return m, nil
 	}
 

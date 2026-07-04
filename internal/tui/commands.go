@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/gitutil"
 	"github.com/BikeshR/chisel/internal/session"
 )
 
@@ -24,6 +25,8 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 		return m.handleThinkCommand(), nil
 	case "/new":
 		return m.handleNewCommand(), nil
+	case "/git":
+		return m.handleGitCommand(fields[1:]), nil
 	default:
 		m.appendLine(errorStyle.Render("unknown command: " + fields[0]))
 		return m, nil
@@ -54,6 +57,42 @@ func (m Model) handleNewCommand() Model {
 	m.lines = nil
 	m.viewport.SetContent("")
 	m.appendLine(dimStyle.Render("started a new session"))
+	return m
+}
+
+// handleGitCommand toggles auto-commit: off by default, since silently
+// creating git history is exactly the kind of thing that should be opted
+// into, not assumed. Refuses to turn on outside a git repo rather than
+// leaving a setting that would just silently no-op every turn.
+func (m Model) handleGitCommand(args []string) Model {
+	if len(args) == 0 || args[0] != "auto" {
+		m.appendLine(dimStyle.Render("usage: /git auto [on|off]"))
+		return m
+	}
+
+	if len(args) == 1 {
+		state := "off"
+		if m.autoCommit {
+			state = "on"
+		}
+		m.appendLine(dimStyle.Render("auto-commit: " + state))
+		return m
+	}
+
+	switch args[1] {
+	case "on":
+		if !gitutil.IsRepo(m.workDir) {
+			m.appendLine(errorStyle.Render(m.workDir + " isn't a git repository — run git init first"))
+			return m
+		}
+		m.autoCommit = true
+		m.appendLine(dimStyle.Render("auto-commit: on — chisel will commit its own changes after each turn"))
+	case "off":
+		m.autoCommit = false
+		m.appendLine(dimStyle.Render("auto-commit: off"))
+	default:
+		m.appendLine(errorStyle.Render("usage: /git auto [on|off]"))
+	}
 	return m
 }
 

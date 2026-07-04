@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/gitutil"
 	"github.com/BikeshR/chisel/internal/session"
 )
 
@@ -47,6 +48,7 @@ type Model struct {
 	streamLineIdx int
 	streamText    string
 	showThinking  bool // /think toggles this; collapsed by default
+	autoCommit    bool // /git auto toggles this; off by default
 
 	tokensIn, tokensOut int64
 	width, height       int
@@ -148,4 +150,46 @@ func saveSession(workDir string, messages []agent.Message) tea.Cmd {
 		}
 		return nil
 	}
+}
+
+// autoCommit stages and commits any changes chisel made this turn, if
+// /git auto is on. Returning a nil Msg (via the early returns below) is
+// deliberate — "nothing to commit" and "not a repo" aren't events worth a
+// line in the transcript every single turn.
+func autoCommit(workDir string, userText string) tea.Cmd {
+	return func() tea.Msg {
+		if !gitutil.IsRepo(workDir) {
+			return nil
+		}
+		changed, err := gitutil.HasChanges(workDir)
+		if err != nil || !changed {
+			return nil
+		}
+		sha, err := gitutil.CommitAll(workDir, commitMessage(userText))
+		return autoCommitResultMsg{sha: sha, err: err}
+	}
+}
+
+// commitMessage derives a short, git-subject-line-length message from the
+// user request that drove this turn's changes.
+func commitMessage(userText string) string {
+	const maxLen = 72
+	subject := firstLine(userText)
+	if len(subject) > maxLen {
+		subject = subject[:maxLen] + "…"
+	}
+	return "chisel: " + subject
+}
+
+// lastUserText returns the most recent user message in messages, for
+// deriving an auto-commit message. Falls back to a generic subject if
+// there somehow isn't one (shouldn't happen in practice — every turn
+// starts with a user message).
+func lastUserText(messages []agent.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return messages[i].Content
+		}
+	}
+	return "changes"
 }

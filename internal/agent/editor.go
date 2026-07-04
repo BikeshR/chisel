@@ -117,23 +117,31 @@ func strReplace(path, oldStr, newStr string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	content := string(data)
 
-	count := strings.Count(content, oldStr)
-	switch count {
-	case 0:
-		return "", fmt.Errorf("old_str not found in %s", path)
-	case 1:
-		// exactly one match, proceed
-	default:
-		return "", fmt.Errorf("old_str matches %d times in %s; must match exactly once", count, path)
+	updated, err := applyStrReplace(string(data), oldStr, newStr)
+	if err != nil {
+		return "", fmt.Errorf("%w (%s)", err, path)
 	}
 
-	updated := strings.Replace(content, oldStr, newStr, 1)
 	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("replaced 1 occurrence in %s", path), nil
+}
+
+// applyStrReplace computes the post-replacement content without touching
+// disk, so PreviewEdit (diff.go) can show what a str_replace would do
+// before it's approved, using the exact same logic that will actually run.
+func applyStrReplace(content, oldStr, newStr string) (string, error) {
+	count := strings.Count(content, oldStr)
+	switch count {
+	case 0:
+		return "", fmt.Errorf("old_str not found")
+	case 1:
+		return strings.Replace(content, oldStr, newStr, 1), nil
+	default:
+		return "", fmt.Errorf("old_str matches %d times; must match exactly once", count)
+	}
 }
 
 func insertText(path string, afterLine int, text string) (string, error) {
@@ -141,20 +149,32 @@ func insertText(path string, afterLine int, text string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	lines := strings.Split(string(data), "\n")
+
+	result, inserted, err := applyInsert(string(data), afterLine, text)
+	if err != nil {
+		return "", fmt.Errorf("%w (%s)", err, path)
+	}
+
+	if err := os.WriteFile(path, []byte(result), 0o644); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("inserted %d line(s) after line %d in %s", inserted, afterLine, path), nil
+}
+
+// applyInsert computes the post-insert content without touching disk —
+// see applyStrReplace.
+func applyInsert(content string, afterLine int, text string) (result string, insertedLines int, err error) {
+	lines := strings.Split(content, "\n")
 
 	if afterLine < 0 || afterLine > len(lines) {
-		return "", fmt.Errorf("insert_line %d out of range (file has %d lines)", afterLine, len(lines))
+		return "", 0, fmt.Errorf("insert_line %d out of range (file has %d lines)", afterLine, len(lines))
 	}
 
 	inserted := strings.Split(text, "\n")
-	result := make([]string, 0, len(lines)+len(inserted))
-	result = append(result, lines[:afterLine]...)
-	result = append(result, inserted...)
-	result = append(result, lines[afterLine:]...)
+	merged := make([]string, 0, len(lines)+len(inserted))
+	merged = append(merged, lines[:afterLine]...)
+	merged = append(merged, inserted...)
+	merged = append(merged, lines[afterLine:]...)
 
-	if err := os.WriteFile(path, []byte(strings.Join(result, "\n")), 0o644); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("inserted %d line(s) after line %d in %s", len(inserted), afterLine, path), nil
+	return strings.Join(merged, "\n"), len(inserted), nil
 }

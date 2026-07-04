@@ -21,6 +21,9 @@ Conversations save automatically per working directory
 (`~/.chisel/sessions/`) and resume the next time you run chisel there;
 `/new` starts a fresh one.
 
+File edits show a diff before you approve them. `/git auto on` (off by
+default) makes chisel commit its own changes after each turn, Aider-style.
+
 ## Development
 
 ```sh

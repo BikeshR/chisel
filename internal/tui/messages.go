@@ -27,3 +27,9 @@ type modelCheckResultMsg struct {
 type sessionSaveErrorMsg struct {
 	err error
 }
+
+// autoCommitResultMsg carries the outcome of a /git auto commit attempt.
+type autoCommitResultMsg struct {
+	sha string
+	err error
+}
