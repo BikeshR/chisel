@@ -55,9 +55,14 @@ type Model struct {
 	autoCommit    bool // /git auto toggles this; off by default
 
 	tokensIn, tokensOut int64
-	width, height       int
-	err                 error
-	quitting            bool
+	// lastContextTokens is the prompt size of the most recent request —
+	// unlike tokensIn (a running total across every request this session,
+	// for cost tracking), this is "how full is the context window right
+	// now", since every request resends the full history.
+	lastContextTokens int64
+	width, height     int
+	err               error
+	quitting          bool
 }
 
 // New builds the initial Model for a chisel session rooted at workDir.
@@ -230,4 +235,63 @@ func lastUserText(messages []agent.Message) string {
 		}
 	}
 	return "changes"
+}
+
+// compactPrompt asks the model to summarize the conversation so far, for
+// /compact. Sent as one more turn through the same client — chisel has no
+// server-side compaction to lean on (that's an Anthropic API feature),
+// so this is the model doing the summarizing itself.
+const compactPrompt = "Summarize this conversation so far in a concise form for continuing the work later: the overall goal, key decisions made, files created or modified and how, and anything still unresolved. Skip narration and pleasantries — just the substance needed to pick back up."
+
+// compact sends messages plus the compaction instruction and returns the
+// model's summary.
+func compact(client *agent.Client, messages []agent.Message) tea.Cmd {
+	return func() tea.Msg {
+		history := append(append([]agent.Message{}, messages...), agent.Message{Role: "user", Content: compactPrompt})
+
+		ch, err := client.SendStreaming(context.Background(), history)
+		if err != nil {
+			return compactResultMsg{err: err}
+		}
+
+		var final agent.Event
+		for ev := range ch {
+			if ev.Done {
+				final = ev
+			}
+		}
+		if final.Err != nil {
+			return compactResultMsg{err: final.Err}
+		}
+		return compactResultMsg{summary: final.Message.Content, usage: final.Usage}
+	}
+}
+
+// compactedHistory replaces the full conversation with a single message
+// carrying the model's own summary of it, framed as background for
+// whatever comes next.
+func compactedHistory(summary string) []agent.Message {
+	return []agent.Message{
+		{Role: "user", Content: "Here is a summary of our conversation so far, before it was compacted to save context:\n\n" + summary + "\n\nContinue from here."},
+	}
+}
+
+// contextWarnThreshold is a conservative, deliberately generic rule of
+// thumb — chisel doesn't maintain a per-model context-window table (the
+// OpenCode Go catalog changes, and getting a specific model's exact limit
+// wrong would be worse than not claiming one at all), so this just flags
+// "this is getting large" rather than "you are at N% of this model's
+// limit".
+const contextWarnThreshold = 100_000
+
+// formatTokenCount renders a token count compactly for the status bar.
+func formatTokenCount(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }

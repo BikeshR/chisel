@@ -33,6 +33,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modelCheckResultMsg:
 		return m.handleModelCheckResult(msg)
 
+	case compactResultMsg:
+		return m.handleCompactResult(msg)
+
 	case sessionSaveErrorMsg:
 		m.appendLine(errorStyle.Render("session save failed: " + msg.err.Error()))
 		return m, nil
@@ -143,6 +146,7 @@ func (m Model) handleStreamComplete(resp agent.Message, finishReason string, usa
 	m.messages = append(m.messages, resp)
 	m.tokensIn += usage.InputTokens
 	m.tokensOut += usage.OutputTokens
+	m.lastContextTokens = usage.InputTokens
 	m.pendingUses = resp.ToolCalls
 	save := saveSession(m.workDir, m.messages)
 

@@ -33,3 +33,10 @@ type autoCommitResultMsg struct {
 	sha string
 	err error
 }
+
+// compactResultMsg carries the outcome of a /compact request.
+type compactResultMsg struct {
+	summary string
+	usage   agent.Usage
+	err     error
+}

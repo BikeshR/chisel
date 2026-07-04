@@ -27,6 +27,8 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 		return m.handleNewCommand(), nil
 	case "/git":
 		return m.handleGitCommand(fields[1:]), nil
+	case "/compact":
+		return m.handleCompactCommand()
 	default:
 		m.appendLine(errorStyle.Render("unknown command: " + fields[0]))
 		return m, nil
@@ -163,4 +165,37 @@ func (m Model) handleModelCheckResult(msg modelCheckResultMsg) (tea.Model, tea.C
 	}
 	m.appendLine(dimStyle.Render(fmt.Sprintf("✓ %s: %s", msg.model, firstLine(msg.reply))))
 	return m, nil
+}
+
+// handleCompactCommand asks the model to summarize the conversation so
+// far and replaces the history with that summary — chisel's answer to
+// "manual context management" since there's no server-side compaction to
+// lean on.
+func (m Model) handleCompactCommand() (Model, tea.Cmd) {
+	if len(m.messages) == 0 {
+		m.appendLine(dimStyle.Render("nothing to compact yet"))
+		return m, nil
+	}
+	m.appendLine(dimStyle.Render("compacting…"))
+	m.state = stateWaitingModel
+	return m, compact(m.client, m.messages)
+}
+
+func (m Model) handleCompactResult(msg compactResultMsg) (tea.Model, tea.Cmd) {
+	m.state = stateInput
+	m.tokensIn += msg.usage.InputTokens
+	m.tokensOut += msg.usage.OutputTokens
+
+	if msg.err != nil {
+		m.appendLine(errorStyle.Render("compact failed: " + msg.err.Error()))
+		return m, nil
+	}
+
+	m.messages = compactedHistory(msg.summary)
+	m.lines = nil
+	m.viewport.SetContent("")
+	m.appendLine(dimStyle.Render("── conversation compacted ──"))
+	m.appendLine(assistantStyle.Render("chisel  ") + renderAssistantText(msg.summary, m.showThinking))
+
+	return m, saveSession(m.workDir, m.messages)
 }

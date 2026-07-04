@@ -229,11 +229,18 @@ Four phases, each a genuinely usable tool in its own right.
   Tools are namespaced `mcp__<server>__<tool>` (`Registry.Tools`/`Registry.Call`) so two servers, or a server and chisel's own fixed tools, can't collide. `internal/mcp` deliberately doesn't import `internal/agent` — it stays a standalone protocol client with its own `Tool` type; converting to `agent.Tool` happens once, in `main.go`, to avoid a would-be import cycle (`agent.Execute` routing MCP calls would need `mcp`, and `mcp.Tools()` returning `agent.Tool` would need `agent`). For the same reason, `agent.NeedsPermission`/`agent.Summarize` don't know about MCP at all — chisel always requires permission for any `mcp__`-prefixed call (it can't know what an arbitrary server's tool does, so none of the built-in read-only auto-allow heuristics apply) and prettifies the prompt into "server: tool", both living in `internal/tui` (`needsPermission`/`summarizeCall` in `model.go`) as a thin layer on top of the `agent` functions, not a change to them.
 
   A hung `tools/call` is bounded by the same defensive pattern as the persistent bash session: a timeout marks the connection broken, and every further call to that server fails fast with a "restart chisel to reconnect" message rather than risking a read desynced from a still-pending request — there's no automatic reconnect in this version. Tested with a real subprocess throughout (`internal/mcp/server_test.go` re-execs the test binary itself as a minimal fake MCP server, the standard Go pattern for testing exec-based clients), not mocked at the transport layer.
-- Context management: manual context editing/summarization as the window fills (no server-side compaction to lean on now — that was an Anthropic API feature)
+- ~~Context management~~ — **done**: `/compact` (`internal/tui/model.go`/`commands.go`) sends the conversation so far plus an instruction to summarize it as one more turn through the same client, then replaces `m.messages` with a single message carrying that summary — the model doing its own compaction, since there's no server-side compaction to lean on here (that was an Anthropic API feature). The status bar now shows the *current* request's prompt size (`lastContextTokens`, from the most recent turn's usage) separately from the running cumulative spend total (`tokensIn`/`tokensOut`) — those answer different questions ("how full is the context window right now" vs "what has this session cost so far") and conflating them into one running sum was arguably a small bug in the original token-tracking design. Past a conservative, deliberately generic 100k-token threshold the status bar suggests `/compact` — chisel doesn't maintain a per-model context-window table (the OpenCode Go catalog changes, and getting a specific model's exact limit wrong would be worse than not claiming one at all).
 - Plan mode — a read-only planning turn, presented for confirmation before execution begins
 - Subagents — spawn a child instance of the same loop with a narrower tool set for a delegated subtask
 - Hooks — pre/post-tool-call callbacks (run a linter after every edit, block writes to certain paths)
 - TUI polish: a dedicated diff view, split panes, Lipgloss theming
+- Memory file — a `CHISEL.md` of project instructions loaded into the system prompt at startup, with a user-level file layered underneath. The one convention every incumbent shares (`CLAUDE.md`, `GEMINI.md`, `AGENTS.md`) and probably the cheapest capability-per-line item left on this list
+- Custom slash commands — user-defined prompt files (per-project plus `~/.chisel/commands/`) that expand into a canned prompt; Claude Code does this with Markdown files, Gemini CLI with TOML that can also splice in `@file` contents and `!{shell}` output
+- Checkpoint/rewind — snapshot files before each turn in a shadow git repo and restore code and conversation together (Gemini's `/restore`, Claude Code's `/rewind`). Not the same thing as `/git auto`: rewind must never write to the project's real history
+- `@file` references — typing `@path/to/file` in the prompt injects the file's contents client-side before sending, with tab completion; saves a whole model round trip for context the user already knows is needed
+- Prompt queueing — typing while the model is streaming queues the next message (applied on the next step) instead of being swallowed; Claude Code treats Enter-mid-turn exactly this way
+- Notify when idle — terminal bell / OSC desktop notification when chisel is blocked on a permission prompt or finishes a turn, so a long turn doesn't need babysitting
+- Todo list — a model-maintained task checklist tool rendered live in the TUI (Claude Code's TodoWrite/Task tools); as much a steering aid for the model as a progress display for the user
 
 ### Phase 4 — Parity-and-beyond
 
@@ -242,6 +249,8 @@ Four phases, each a genuinely usable tool in its own right.
 - User-defined skill files chisel loads on demand
 - Background/async task execution with completion notifications
 - Lightweight IDE integration, if it turns out to matter for daily use
+- Headless mode — `chisel -p "prompt"` runs one non-interactive turn and prints text or JSON to stdout, for scripts and CI; every incumbent has this (`claude -p`, `codex exec`, `gemini -p`, `opencode run`) and it's what makes an agent composable
+- Image input — attach a screenshot or design spec to a message (Codex and Claude Code both take pasted images); gated on whether OpenCode Go's catalog actually serves a vision-capable model (`mimo-v2-omni` suggests maybe)
 
 ## 6. Bottom line
 

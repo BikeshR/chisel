@@ -24,6 +24,11 @@ Conversations save automatically per working directory
 File edits show a diff before you approve them. `/git auto on` (off by
 default) makes chisel commit its own changes after each turn, Aider-style.
 
+The status bar shows the current request's context size separately from
+cumulative token spend; past 100k tokens it'll suggest `/compact`, which
+asks the model to summarize the conversation so far and replaces the
+history with that summary.
+
 ## MCP servers
 
 List servers in `~/.chisel/mcp.json` — same `mcpServers` shape Claude

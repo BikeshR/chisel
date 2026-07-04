@@ -108,3 +108,12 @@ field — are handled in `internal/tui/think.go`'s `renderAssistantText`,
 which re-scans the full accumulated text on every render rather than
 tracking incremental parse state (so a tag split across two streamed
 chunks is handled for free, at the cost of re-scanning on every delta).
+
+**Two different token counters answer two different questions — don't
+merge them.** `Model.tokensIn`/`tokensOut` (`update.go`) are a running sum
+across every request this session, for cost tracking. `Model.
+lastContextTokens` is just the most recent request's prompt size — "how
+full is the context window right now" — since every request resends the
+full history, summing across turns would double-count and isn't the
+number `/compact`'s warning threshold (`contextWarnThreshold`, `model.go`)
+should ever compare against.
