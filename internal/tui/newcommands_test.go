@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/customcmd"
 	"github.com/BikeshR/chisel/internal/hooks"
 	"github.com/BikeshR/chisel/internal/mcp"
 )
@@ -121,4 +122,71 @@ func TestBrokenMCPCountZeroForNoServers(t *testing.T) {
 func TestSyncMCPHealthWithNilRegistryDoesNotPanic(t *testing.T) {
 	m := Model{client: agent.New("minimax-m3")}
 	m.syncMCPHealth()
+}
+
+func TestCustomCommandExpandsAndSubmits(t *testing.T) {
+	m := Model{
+		client: agent.New("minimax-m3"),
+		customCommands: map[string]customcmd.Command{
+			"review": {Name: "review", Template: "review $ARGUMENTS for bugs"},
+		},
+	}
+
+	got, cmd := m.handleCommand("/review main.go")
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd to start the request")
+	}
+	if len(got.messages) != 1 {
+		t.Fatalf("messages = %+v, want the expanded template sent", got.messages)
+	}
+	if got.messages[0].Content != "review main.go for bugs" {
+		t.Errorf("message content = %q, want the expanded template", got.messages[0].Content)
+	}
+	if got.state != stateWaitingModel {
+		t.Errorf("state = %v, want stateWaitingModel", got.state)
+	}
+}
+
+func TestCustomCommandWithoutArguments(t *testing.T) {
+	m := Model{
+		client: agent.New("minimax-m3"),
+		customCommands: map[string]customcmd.Command{
+			"standup": {Name: "standup", Template: "summarize what changed today"},
+		},
+	}
+
+	got, cmd := m.handleCommand("/standup")
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd")
+	}
+	if len(got.messages) != 1 || got.messages[0].Content != "summarize what changed today" {
+		t.Errorf("messages = %+v", got.messages)
+	}
+}
+
+func TestUnknownCommandStillReportsErrorWhenNoCustomMatch(t *testing.T) {
+	m := Model{customCommands: map[string]customcmd.Command{"review": {}}}
+	got, cmd := m.handleCommand("/bogus")
+	if cmd != nil {
+		t.Error("expected a nil Cmd for an unknown command")
+	}
+	lines := got.renderedLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "unknown command") {
+		t.Errorf("lines = %+v, want an unknown-command error", lines)
+	}
+}
+
+func TestHelpListsCustomCommands(t *testing.T) {
+	m := Model{
+		customCommands: map[string]customcmd.Command{
+			"review": {Name: "review"},
+			"deploy": {Name: "deploy"},
+		},
+	}
+	got := m.handleHelpCommand()
+	lines := got.renderedLines()
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "/review") || !strings.Contains(joined, "/deploy") {
+		t.Errorf("help output = %q, want both custom commands listed", joined)
+	}
 }

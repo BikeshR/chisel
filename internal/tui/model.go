@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/customcmd"
 	"github.com/BikeshR/chisel/internal/gitutil"
 	"github.com/BikeshR/chisel/internal/hooks"
 	"github.com/BikeshR/chisel/internal/mcp"
@@ -51,6 +52,11 @@ type Model struct {
 	// content itself already went to the client via SetMemory before
 	// this Model was ever built.
 	memUser, memProject bool
+	// customCommands are user-defined slash commands loaded at startup
+	// (~/.chisel/commands/*.md and <workDir>/.chisel/commands/*.md) —
+	// see handleCommand's default case, which checks here before
+	// reporting a command as unknown.
+	customCommands map[string]customcmd.Command
 
 	messages []agent.Message
 	entries  []entry // transcript, newest last — see transcript.go
@@ -159,7 +165,9 @@ func interruptibleErrorText(err error) string {
 // is fine and just means no hooks configured. memUser/memProject report
 // which CHISEL.md files memory.Load found, just to show a startup line —
 // the content itself was already handed to the client via SetMemory.
-func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, resumed []agent.Message, savedAt time.Time) Model {
+// customCommands comes from customcmd.Load — a nil/empty map is fine and
+// just means no custom commands are available.
+func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, customCommands map[string]customcmd.Command, resumed []agent.Message, savedAt time.Time) Model {
 	ta := textarea.New()
 	ta.Placeholder = "ask chisel to do something… (alt+enter for a new line, @path to reference a file, /help for commands)"
 	ta.Focus()
@@ -178,19 +186,20 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 	vp.MouseWheelEnabled = true
 
 	m := Model{
-		client:        client,
-		workDir:       workDir,
-		bash:          bash,
-		mcp:           mcpRegistry,
-		hooks:         hooksCfg,
-		memUser:       memUser,
-		memProject:    memProject,
-		messages:      resumed,
-		textArea:      ta,
-		viewport:      vp,
-		spinner:       sp,
-		state:         stateInput,
-		streamLineIdx: -1,
+		client:         client,
+		workDir:        workDir,
+		bash:           bash,
+		mcp:            mcpRegistry,
+		hooks:          hooksCfg,
+		memUser:        memUser,
+		memProject:     memProject,
+		customCommands: customCommands,
+		messages:       resumed,
+		textArea:       ta,
+		viewport:       vp,
+		spinner:        sp,
+		state:          stateInput,
+		streamLineIdx:  -1,
 	}
 
 	if memUser || memProject {

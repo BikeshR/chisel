@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/customcmd"
 	"github.com/BikeshR/chisel/internal/gitutil"
 	"github.com/BikeshR/chisel/internal/session"
 )
@@ -39,9 +40,30 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 	case "/help":
 		return m.handleHelpCommand(), nil
 	default:
+		return m.handleCustomOrUnknownCommand(text, fields)
+	}
+}
+
+// handleCustomOrUnknownCommand checks fields[0] against the user-defined
+// commands loaded at startup (~/.chisel/commands/*.md and
+// <workDir>/.chisel/commands/*.md — see customcmd.Load) before falling
+// back to reporting it as unknown. A match is expanded (substituting
+// $ARGUMENTS with whatever followed the command name, or appending it if
+// the template doesn't reference $ARGUMENTS at all) and submitted exactly
+// like a normal typed message — no special trust gate, unlike hooks:
+// this is canned prompt text, not code that runs automatically, so
+// whatever the model does in response still goes through the normal
+// permission gate.
+func (m Model) handleCustomOrUnknownCommand(text string, fields []string) (Model, tea.Cmd) {
+	name := strings.TrimPrefix(fields[0], "/")
+	cmd, ok := m.customCommands[name]
+	if !ok {
 		m.appendLine(errorStyle.Render("unknown command: " + fields[0] + " — /help lists what's available"))
 		return m, nil
 	}
+
+	args := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
+	return m.submitText(customcmd.Expand(cmd, args))
 }
 
 // helpText is shown by /help and mirrors what handleCommand actually
@@ -68,7 +90,11 @@ keys:
   ctrl+c                quit`
 
 func (m Model) handleHelpCommand() Model {
-	m.appendLine(dimStyle.Render(helpText))
+	text := helpText
+	if names := customcmd.Names(m.customCommands); len(names) > 0 {
+		text += "\n\ncustom commands:\n  /" + strings.Join(names, ", /")
+	}
+	m.appendLine(dimStyle.Render(text))
 	return m
 }
 

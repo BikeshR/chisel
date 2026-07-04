@@ -16,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/customcmd"
 	"github.com/BikeshR/chisel/internal/hooks"
 	"github.com/BikeshR/chisel/internal/mcp"
 	"github.com/BikeshR/chisel/internal/memory"
@@ -85,7 +86,8 @@ func main() {
 	}
 
 	resumed, savedAt, _ := session.Load(workDir)
-	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, memUser, memProject, resumed, savedAt)
+	customCommands := customcmd.Load(workDir)
+	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, memUser, memProject, customCommands, resumed, savedAt)
 
 	if _, err := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "chisel:", err)
