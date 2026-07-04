@@ -297,7 +297,7 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 		m.state = stateAwaitingPermission
 		prompt := fmt.Sprintf("allow %s?  [y/n]", summarizeCall(call))
 		if diff, ok := agent.PreviewEdit(m.workDir, call); ok {
-			prompt = fmt.Sprintf("allow %s?\n\n%s\n[y/n]", summarizeCall(call), strings.TrimRight(diff, "\n"))
+			prompt = fmt.Sprintf("allow %s?\n\n%s\n[y/n]", summarizeCall(call), colorizeDiff(diff))
 		}
 		m.appendLine(permissionStyle.Render(prompt))
 		return m, notifyIdle("chisel needs your permission")
