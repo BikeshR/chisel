@@ -207,7 +207,7 @@ func interruptibleErrorText(err error) string {
 // the system prompt and the tool's actual lookup stay in sync.
 func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, customCommands map[string]customcmd.Command, checkpointStore *checkpoint.Store, skills map[string]skill.Skill, resumed []agent.Message, savedAt time.Time) Model {
 	ta := textarea.New()
-	ta.Placeholder = "ask chisel to do something… (alt+enter for a new line, @path to reference a file, /help for commands)"
+	ta.Placeholder = "ask chisel to do something… (alt+enter for a new line, @path to reference a file, !cmd to run a shell command directly, /help for commands)"
 	ta.Focus()
 	ta.CharLimit = 0 // unbounded — the whole point is supporting long pastes
 	ta.ShowLineNumbers = false

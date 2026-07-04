@@ -88,6 +88,7 @@ keys:
   enter                 submit · in a permission prompt, only y/Y approves · while busy, queues instead
   alt+enter             insert a newline while composing a message
   @path                 reference a file — its content is sent to the model, tab to complete
+  !command              run a shell command directly, bypassing the model entirely — no permission prompt
   esc                   interrupt a running request/tool · deny a permission prompt
   y / n / a             approve / deny / always-allow-this-session in a permission prompt
   pgup/pgdn, ctrl+u/d   scroll the transcript

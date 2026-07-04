@@ -70,6 +70,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case backgroundTaskDoneMsg:
 		return m.handleBackgroundTaskDone(msg)
 
+	case bangResultMsg:
+		return m.handleBangResult(msg)
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -252,6 +255,12 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(text, "/") {
 		var cmd tea.Cmd
 		m, cmd = m.handleCommand(text)
+		return m, tea.Batch(cmd, textarea.Blink)
+	}
+
+	if strings.HasPrefix(text, "!") {
+		var cmd tea.Cmd
+		m, cmd = m.runBang(strings.TrimPrefix(text, "!"))
 		return m, tea.Batch(cmd, textarea.Blink)
 	}
 
