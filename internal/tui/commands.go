@@ -37,15 +37,18 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 	}
 }
 
-// handleThinkCommand toggles whether inline <think> blocks render in full.
-// Only affects turns from here on — already-rendered lines keep whatever
-// form they were collapsed (or not) to at the time.
+// handleThinkCommand toggles whether inline <think> blocks render in
+// full. Every assistant entry re-renders against the new setting the
+// next time the viewport refreshes (appendLine, below, does that) —
+// including ones from earlier in the conversation or a resumed session,
+// since entry.render always applies the *current* showThinking rather
+// than whatever was in effect when the entry was appended.
 func (m Model) handleThinkCommand() Model {
 	m.showThinking = !m.showThinking
 	if m.showThinking {
-		m.appendLine(dimStyle.Render("thinking blocks: shown (for new messages)"))
+		m.appendLine(dimStyle.Render("thinking blocks: shown"))
 	} else {
-		m.appendLine(dimStyle.Render("thinking blocks: hidden (for new messages)"))
+		m.appendLine(dimStyle.Render("thinking blocks: hidden"))
 	}
 	return m
 }
@@ -67,14 +70,19 @@ func (m Model) handlePlanCommand() Model {
 // handleNewCommand abandons the current transcript, in memory and on
 // disk, and starts fresh. Doesn't touch which model is selected or the
 // bash session's cd/env state — those aren't part of "the conversation".
+// The clear error (if any) is appended *after* the reset, not before —
+// appending first and then wiping m.entries would erase it before it was
+// ever actually shown.
 func (m Model) handleNewCommand() Model {
-	if err := session.Clear(m.workDir); err != nil {
-		m.appendLine(errorStyle.Render("failed to clear saved session: " + err.Error()))
-	}
+	clearErr := session.Clear(m.workDir)
 	m.messages = nil
-	m.lines = nil
+	m.entries = nil
+	m.lastContextTokens = 0
 	m.viewport.SetContent("")
 	m.appendLine(dimStyle.Render("started a new session"))
+	if clearErr != nil {
+		m.appendLine(errorStyle.Render("failed to clear saved session: " + clearErr.Error()))
+	}
 	return m
 }
 
@@ -205,10 +213,11 @@ func (m Model) handleCompactResult(msg compactResultMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.messages = compactedHistory(msg.summary)
-	m.lines = nil
+	m.entries = nil
+	m.lastContextTokens = 0
 	m.viewport.SetContent("")
 	m.appendLine(dimStyle.Render("── conversation compacted ──"))
-	m.appendLine(assistantStyle.Render("chisel  ") + renderAssistantText(msg.summary, m.showThinking))
+	m.appendAssistantEntry(msg.summary)
 
 	return m, saveSession(m.workDir, m.messages)
 }

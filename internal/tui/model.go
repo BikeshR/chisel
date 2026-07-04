@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -41,7 +40,7 @@ type Model struct {
 	hooks   hooks.Config
 
 	messages []agent.Message
-	lines    []string // rendered transcript, newest last
+	entries  []entry // transcript, newest last — see transcript.go
 
 	textInput textinput.Model
 	viewport  viewport.Model
@@ -51,8 +50,9 @@ type Model struct {
 	pendingUses    []agent.ToolCall
 	pendingResults []agent.Message // one "tool" role message per completed call
 
-	// streamLineIdx is the index into lines of the assistant line currently
-	// being built from streamed text deltas, or -1 if none is in progress.
+	// streamLineIdx is the index into entries of the assistant line
+	// currently being built from streamed text deltas, or -1 if none is
+	// in progress.
 	streamLineIdx int
 	streamText    string
 	showThinking  bool // /think toggles this; collapsed by default
@@ -148,16 +148,16 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 	}
 
 	if memUser || memProject {
-		m.lines = append(m.lines, dimStyle.Render("loaded "+memoryBannerText(memUser, memProject)))
+		m.entries = append(m.entries, entry{styled: dimStyle.Render("loaded " + memoryBannerText(memUser, memProject))})
 	}
 
 	if len(resumed) > 0 {
-		m.lines = append(m.lines, resumeBanner(len(resumed), savedAt))
-		m.lines = append(m.lines, renderHistory(resumed, m.showThinking)...)
+		m.entries = append(m.entries, entry{styled: resumeBanner(len(resumed), savedAt)})
+		m.entries = append(m.entries, renderHistory(resumed)...)
 	}
 
-	if len(m.lines) > 0 {
-		m.viewport.SetContent(joinLines(m.lines))
+	if len(m.entries) > 0 {
+		m.refreshViewport()
 		m.viewport.GotoBottom()
 	}
 
@@ -180,26 +180,30 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m *Model) appendLine(s string) {
-	m.lines = append(m.lines, s)
-	m.viewport.SetContent(joinLines(m.lines))
+	m.entries = append(m.entries, entry{styled: s})
+	m.refreshViewport()
 	m.viewport.GotoBottom()
 }
 
-func joinLines(lines []string) string {
-	return strings.Join(lines, "\n")
+// appendAssistantEntry is appendLine's counterpart for text that should
+// be re-collapsible/expandable by /think — see entry.isAssistant.
+func (m *Model) appendAssistantEntry(raw string) {
+	m.entries = append(m.entries, entry{isAssistant: true, raw: raw})
+	m.refreshViewport()
+	m.viewport.GotoBottom()
 }
 
 // appendStreamText appends a text delta to the assistant line currently
 // being streamed, starting a new line on the first delta of a turn.
 func (m *Model) appendStreamText(delta string) {
 	if m.streamLineIdx == -1 {
-		m.lines = append(m.lines, "")
-		m.streamLineIdx = len(m.lines) - 1
+		m.entries = append(m.entries, entry{isAssistant: true})
+		m.streamLineIdx = len(m.entries) - 1
 		m.streamText = ""
 	}
 	m.streamText += delta
-	m.lines[m.streamLineIdx] = assistantStyle.Render("chisel  ") + renderAssistantText(m.streamText, m.showThinking)
-	m.viewport.SetContent(joinLines(m.lines))
+	m.entries[m.streamLineIdx].raw = m.streamText
+	m.refreshViewport()
 	m.viewport.GotoBottom()
 }
 

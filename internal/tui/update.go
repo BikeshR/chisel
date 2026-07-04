@@ -22,6 +22,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Width = msg.Width
 		m.viewport.Height = msg.Height - 4 // input line + status bar + margin
 		m.textInput.Width = msg.Width - 2
+		// Re-wrap every entry to the new width — without this, the
+		// viewport's own hard truncation (not wrapping) at msg.Width
+		// would otherwise just cut off anything wider than the new
+		// terminal, silently dropping content rather than reflowing it.
+		m.refreshViewport()
 		return m, nil
 
 	case tea.KeyMsg:

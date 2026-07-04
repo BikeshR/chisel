@@ -8,34 +8,38 @@ import (
 	"github.com/BikeshR/chisel/internal/agent"
 )
 
-// renderHistory reconstructs transcript lines from a resumed conversation,
-// following the same per-role rendering conventions the live session uses
-// (see update.go) — but without replaying the permission-prompt step,
-// since every one of these tool calls was already resolved in a past run.
-func renderHistory(messages []agent.Message, showThinking bool) []string {
-	var lines []string
+// renderHistory reconstructs transcript entries from a resumed
+// conversation, following the same per-role rendering conventions the
+// live session uses (see update.go) — but without replaying the
+// permission-prompt step, since every one of these tool calls was
+// already resolved in a past run. Assistant messages become isAssistant
+// entries (raw, uncollapsed) rather than pre-rendered text, same as a
+// live turn — so /think toggling affects resumed history exactly the
+// same way it affects anything said in the current session.
+func renderHistory(messages []agent.Message) []entry {
+	var entries []entry
 	for _, msg := range messages {
 		switch msg.Role {
 		case "user":
-			lines = append(lines, userStyle.Render("you  ")+msg.Content)
+			entries = append(entries, entry{styled: userStyle.Render("you  ") + msg.Content})
 
 		case "assistant":
 			if msg.Content != "" {
-				lines = append(lines, assistantStyle.Render("chisel  ")+renderAssistantText(msg.Content, showThinking))
+				entries = append(entries, entry{isAssistant: true, raw: msg.Content})
 			}
 			for _, call := range msg.ToolCalls {
-				lines = append(lines, toolStyle.Render("  "+summarizeCall(call)))
+				entries = append(entries, entry{styled: toolStyle.Render("  " + summarizeCall(call))})
 			}
 
 		case "tool":
 			if rest, isErr := strings.CutPrefix(msg.Content, agent.ErrorContentPrefix); isErr {
-				lines = append(lines, errorStyle.Render("  ✗ "+firstLine(rest)))
+				entries = append(entries, entry{styled: errorStyle.Render("  ✗ " + firstLine(rest))})
 			} else {
-				lines = append(lines, dimStyle.Render("  ✓ "+firstLine(msg.Content)))
+				entries = append(entries, entry{styled: dimStyle.Render("  ✓ " + firstLine(msg.Content))})
 			}
 		}
 	}
-	return lines
+	return entries
 }
 
 // resumeBanner is the informational line shown above a reconstructed

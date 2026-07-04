@@ -8,6 +8,18 @@ import (
 	"github.com/BikeshR/chisel/internal/agent"
 )
 
+// renderedEntryLines renders renderHistory's output with showThinking
+// false, matching what these tests checked back when renderHistory
+// itself returned already-rendered []string.
+func renderedEntryLines(messages []agent.Message) []string {
+	entries := renderHistory(messages)
+	lines := make([]string, len(entries))
+	for i, e := range entries {
+		lines[i] = e.render(false)
+	}
+	return lines
+}
+
 func TestRenderHistory(t *testing.T) {
 	messages := []agent.Message{
 		{Role: "user", Content: "list go files"},
@@ -21,7 +33,7 @@ func TestRenderHistory(t *testing.T) {
 		{Role: "assistant", Content: "Found 2 files."},
 	}
 
-	lines := renderHistory(messages, false)
+	lines := renderedEntryLines(messages)
 	if len(lines) != 4 {
 		t.Fatalf("got %d lines, want 4: %+v", len(lines), lines)
 	}
@@ -43,7 +55,7 @@ func TestRenderHistoryErrorToolResult(t *testing.T) {
 	messages := []agent.Message{
 		{Role: "tool", ToolCallID: "call_1", Content: agent.ErrorContentPrefix + "permission denied"},
 	}
-	lines := renderHistory(messages, false)
+	lines := renderedEntryLines(messages)
 	if len(lines) != 1 || !strings.Contains(lines[0], "✗") || !strings.Contains(lines[0], "permission denied") {
 		t.Errorf("lines = %+v, want a single failure line without the raw error-marker prefix", lines)
 	}
@@ -61,7 +73,7 @@ func TestRenderHistoryDoesNotFalsePositiveOnErrorLookingContent(t *testing.T) {
 	messages := []agent.Message{
 		{Role: "tool", ToolCallID: "call_1", Content: "Error: this is just a log message the command printed, not a failure"},
 	}
-	lines := renderHistory(messages, false)
+	lines := renderedEntryLines(messages)
 	if len(lines) != 1 || !strings.Contains(lines[0], "✓") {
 		t.Errorf("lines = %+v, want a success line — content starting with the English phrase \"Error: \" isn't chisel's own error marker", lines)
 	}
@@ -75,7 +87,7 @@ func TestRenderHistorySkipsEmptyAssistantContent(t *testing.T) {
 			{ID: "call_1", Type: "function", Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"ls"}`}},
 		}},
 	}
-	lines := renderHistory(messages, false)
+	lines := renderedEntryLines(messages)
 	if len(lines) != 1 {
 		t.Fatalf("got %d lines, want exactly 1 (the tool-call summary): %+v", len(lines), lines)
 	}

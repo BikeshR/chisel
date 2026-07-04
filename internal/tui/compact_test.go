@@ -44,8 +44,9 @@ func TestHandleCompactCommandEmptyHistory(t *testing.T) {
 	if cmd != nil {
 		t.Error("expected a nil Cmd when there's nothing to compact")
 	}
-	if len(got.lines) != 1 || !strings.Contains(got.lines[0], "nothing to compact") {
-		t.Errorf("lines = %+v", got.lines)
+	lines := got.renderedLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "nothing to compact") {
+		t.Errorf("lines = %+v", lines)
 	}
 }
 
@@ -64,7 +65,7 @@ func TestHandleCompactResultSuccess(t *testing.T) {
 	m := Model{
 		state:    stateWaitingModel,
 		messages: []agent.Message{{Role: "user", Content: "a"}, {Role: "assistant", Content: "b"}},
-		lines:    []string{"you  a", "chisel  b"},
+		entries:  []entry{{styled: "you  a"}, {styled: "chisel  b"}},
 	}
 	got, cmd := m.handleCompactResult(compactResultMsg{
 		summary: "we did X and Y",
@@ -87,14 +88,15 @@ func TestHandleCompactResultSuccess(t *testing.T) {
 	if gotModel.tokensIn != 100 || gotModel.tokensOut != 20 {
 		t.Errorf("tokensIn/tokensOut = %d/%d, want 100/20 (compaction's own usage still counts)", gotModel.tokensIn, gotModel.tokensOut)
 	}
+	lines := gotModel.renderedLines()
 	found := false
-	for _, l := range gotModel.lines {
+	for _, l := range lines {
 		if strings.Contains(l, "we did X and Y") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("lines = %+v, want the summary to be shown", gotModel.lines)
+		t.Errorf("lines = %+v, want the summary to be shown", lines)
 	}
 }
 
@@ -115,7 +117,8 @@ func TestHandleCompactResultError(t *testing.T) {
 	if len(gotModel.messages) != 1 {
 		t.Errorf("messages = %+v, want the original history preserved on failure", gotModel.messages)
 	}
-	if len(gotModel.lines) != 1 || !strings.Contains(gotModel.lines[0], "stream failed") {
-		t.Errorf("lines = %+v, want an error line mentioning the failure", gotModel.lines)
+	lines := gotModel.renderedLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "stream failed") {
+		t.Errorf("lines = %+v, want an error line mentioning the failure", lines)
 	}
 }

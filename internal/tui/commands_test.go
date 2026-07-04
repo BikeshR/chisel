@@ -33,8 +33,9 @@ func TestHandleModelCheckResult(t *testing.T) {
 		if cmd != nil {
 			t.Error("expected a nil Cmd after a check result")
 		}
-		if len(gotModel.lines) != 1 || !strings.Contains(gotModel.lines[0], "minimax-m3") || !strings.Contains(gotModel.lines[0], "ok") {
-			t.Errorf("lines = %+v, want a line mentioning the model and its reply", gotModel.lines)
+		lines := gotModel.renderedLines()
+		if len(lines) != 1 || !strings.Contains(lines[0], "minimax-m3") || !strings.Contains(lines[0], "ok") {
+			t.Errorf("lines = %+v, want a line mentioning the model and its reply", lines)
 		}
 	})
 
@@ -46,8 +47,9 @@ func TestHandleModelCheckResult(t *testing.T) {
 		if gotModel.state != stateInput {
 			t.Errorf("state = %v, want stateInput", gotModel.state)
 		}
-		if len(gotModel.lines) != 1 || !strings.Contains(gotModel.lines[0], "kimi-k2.6") || !strings.Contains(gotModel.lines[0], "upstream request failed") {
-			t.Errorf("lines = %+v, want a line mentioning the model and the error", gotModel.lines)
+		lines := gotModel.renderedLines()
+		if len(lines) != 1 || !strings.Contains(lines[0], "kimi-k2.6") || !strings.Contains(lines[0], "upstream request failed") {
+			t.Errorf("lines = %+v, want a line mentioning the model and the error", lines)
 		}
 	})
 }
@@ -63,15 +65,16 @@ func TestHandleNewCommand(t *testing.T) {
 	m := Model{
 		workDir:  workDir,
 		messages: []agent.Message{{Role: "user", Content: "old conversation"}},
-		lines:    []string{"you  old conversation"},
+		entries:  []entry{{styled: "you  old conversation"}},
 	}
 	got := m.handleNewCommand()
 
 	if len(got.messages) != 0 {
 		t.Errorf("messages = %+v, want empty", got.messages)
 	}
-	if len(got.lines) != 1 || !strings.Contains(got.lines[0], "new session") {
-		t.Errorf("lines = %+v, want a single line announcing a new session", got.lines)
+	lines := got.renderedLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "new session") {
+		t.Errorf("lines = %+v, want a single line announcing a new session", lines)
 	}
 	if _, _, ok := session.Load(workDir); ok {
 		t.Error("session.Load after /new: ok = true, want the saved session cleared")
@@ -82,16 +85,18 @@ func TestHandleGitCommand(t *testing.T) {
 	t.Run("status with no args", func(t *testing.T) {
 		m := Model{workDir: t.TempDir()}
 		got := m.handleGitCommand(nil)
-		if len(got.lines) != 1 || !strings.Contains(got.lines[0], "usage") {
-			t.Errorf("lines = %+v, want a usage line for a bare /git", got.lines)
+		lines := got.renderedLines()
+		if len(lines) != 1 || !strings.Contains(lines[0], "usage") {
+			t.Errorf("lines = %+v, want a usage line for a bare /git", lines)
 		}
 	})
 
 	t.Run("auto with no on/off shows current state", func(t *testing.T) {
 		m := Model{workDir: t.TempDir()}
 		got := m.handleGitCommand([]string{"auto"})
-		if len(got.lines) != 1 || !strings.Contains(got.lines[0], "off") {
-			t.Errorf("lines = %+v, want it to report auto-commit is off", got.lines)
+		lines := got.renderedLines()
+		if len(lines) != 1 || !strings.Contains(lines[0], "off") {
+			t.Errorf("lines = %+v, want it to report auto-commit is off", lines)
 		}
 	})
 
@@ -101,8 +106,9 @@ func TestHandleGitCommand(t *testing.T) {
 		if got.autoCommit {
 			t.Error("autoCommit = true outside a git repo, want it to refuse")
 		}
-		if len(got.lines) != 1 || !strings.Contains(got.lines[0], "git repository") {
-			t.Errorf("lines = %+v, want an error mentioning it's not a git repo", got.lines)
+		lines := got.renderedLines()
+		if len(lines) != 1 || !strings.Contains(lines[0], "git repository") {
+			t.Errorf("lines = %+v, want an error mentioning it's not a git repo", lines)
 		}
 	})
 

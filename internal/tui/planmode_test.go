@@ -14,8 +14,9 @@ func TestHandlePlanCommandToggle(t *testing.T) {
 	if !got.client.PlanMode() {
 		t.Error("PlanMode() = false after first /plan, want true")
 	}
-	if len(got.lines) != 1 || !strings.Contains(got.lines[0], "on") {
-		t.Errorf("lines = %+v, want a line announcing plan mode is on", got.lines)
+	lines := got.renderedLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "on") {
+		t.Errorf("lines = %+v, want a line announcing plan mode is on", lines)
 	}
 
 	got = got.handlePlanCommand()
@@ -47,14 +48,15 @@ func TestDispatchNextToolBlocksInPlanMode(t *testing.T) {
 	if len(gotModel.pendingUses) != 0 {
 		t.Error("pendingUses not cleared — the blocked call should be resolved like any other completed tool call")
 	}
+	lines := gotModel.renderedLines()
 	found := false
-	for _, l := range gotModel.lines {
+	for _, l := range lines {
 		if strings.Contains(l, "blocked") && strings.Contains(l, "plan mode") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("lines = %+v, want a line explaining the call was blocked by plan mode", gotModel.lines)
+		t.Errorf("lines = %+v, want a line explaining the call was blocked by plan mode", lines)
 	}
 }
 
