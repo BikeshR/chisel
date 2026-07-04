@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/mcp"
 )
 
 // unsetEnvForTest unsets key for the duration of the test, restoring
@@ -409,5 +411,88 @@ func TestRunHeadlessCoreReturnsUsage(t *testing.T) {
 	}
 	if usage.InputTokens != 55 || usage.OutputTokens != 11 {
 		t.Errorf("usage = %+v, want {55 11}", usage)
+	}
+}
+
+func TestMaybeAddGoplsNoGoMod(t *testing.T) {
+	r := &mcp.Registry{}
+	maybeAddGopls(r, t.TempDir())
+	if len(r.Tools()) != 0 {
+		t.Errorf("Tools() = %+v, want none added without a go.mod", r.Tools())
+	}
+}
+
+func TestMaybeAddGoplsNotOnPath(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module test\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir()) // a directory guaranteed not to contain gopls
+
+	r := &mcp.Registry{}
+	maybeAddGopls(r, workDir)
+	if len(r.Tools()) != 0 {
+		t.Errorf("Tools() = %+v, want none added when gopls isn't on PATH", r.Tools())
+	}
+}
+
+// TestMaybeAddGoplsRealServer is a real, live test against an actually
+// installed gopls — skipped if it isn't available, since chisel doesn't
+// bundle or require it (same reasoning as any other MCP server: it's
+// something the user separately has, not something chisel installs).
+func TestMaybeAddGoplsRealServer(t *testing.T) {
+	if _, err := exec.LookPath("gopls"); err != nil {
+		t.Skip("gopls not installed — skipping live verification")
+	}
+
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module test\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &mcp.Registry{}
+	maybeAddGopls(r, workDir)
+	defer r.Close()
+
+	found := false
+	for _, tool := range r.Tools() {
+		if tool.Name == "mcp__gopls__go_diagnostics" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Tools() = %+v, want mcp__gopls__go_diagnostics from the real gopls mcp server", r.Tools())
+	}
+}
+
+// TestMaybeAddGoplsDoesNotOverrideUserConfiguredServer verifies the
+// collision guard from maybeAddGopls's own call site: pre-seed the
+// registry with a "gopls" entry (as if the user had already configured
+// one in ~/.chisel/mcp.json themselves) using gopls itself, so the
+// pre-seeded entry is a real, working MCP server — then call
+// maybeAddGopls again and confirm it doesn't panic or attempt a second,
+// redundant start now that the name is taken.
+func TestMaybeAddGoplsDoesNotOverrideUserConfiguredServer(t *testing.T) {
+	if _, err := exec.LookPath("gopls"); err != nil {
+		t.Skip("gopls not installed — skipping")
+	}
+
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module test\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &mcp.Registry{}
+	if err := r.AddServer("gopls", mcp.ServerConfig{Command: "gopls", Args: []string{"mcp"}}); err != nil {
+		t.Fatalf("pre-seeding a user-configured 'gopls' server: %v", err)
+	}
+	defer r.Close()
+
+	before := len(r.Tools())
+	maybeAddGopls(r, workDir) // must not panic or add a redundant second server
+	after := len(r.Tools())
+
+	if before != after {
+		t.Errorf("tool count changed from %d to %d, want unchanged — a second gopls server must not be started", before, after)
 	}
 }

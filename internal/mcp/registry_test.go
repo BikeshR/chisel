@@ -221,3 +221,53 @@ func TestLoadAndStartAllStartsServersConcurrently(t *testing.T) {
 		t.Errorf("LoadAndStartAll took %s for 3 servers each delayed %dms — want close to one delay (concurrent), not the sum (sequential)", elapsed, delayMS)
 	}
 }
+
+func TestRegistryAddServer(t *testing.T) {
+	r := &Registry{servers: map[string]*Server{}}
+	if err := r.AddServer("fake", fakeServerConfig()); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	defer r.Close()
+
+	tools := r.Tools()
+	if len(tools) != 1 || tools[0].Name != "mcp__fake__echo" {
+		t.Errorf("Tools() = %+v, want mcp__fake__echo", tools)
+	}
+}
+
+func TestRegistryAddServerRefusesCollisionWithExistingServer(t *testing.T) {
+	r := &Registry{servers: map[string]*Server{}}
+	if err := r.AddServer("fake", fakeServerConfig()); err != nil {
+		t.Fatalf("AddServer: %v", err)
+	}
+	defer r.Close()
+
+	err := r.AddServer("fake", fakeServerConfig())
+	if err == nil {
+		t.Fatal("expected an error adding a server under an already-used name")
+	}
+
+	// The original server must still be the one running — a second
+	// AddServer with the same name must not have replaced it.
+	if len(r.servers) != 1 {
+		t.Errorf("servers = %+v, want the original left untouched", r.servers)
+	}
+}
+
+// TestRegistryAddServerOnZeroValueRegistry is the regression test for a
+// real nil-map panic: a bare &Registry{} (as opposed to one built via
+// LoadAndStartAll, which always initializes servers) is a natural way
+// to construct one just to add a single server, and AddServer must not
+// require the caller to know LoadAndStartAll's internal initialization
+// detail to avoid a panic on the first add.
+func TestRegistryAddServerOnZeroValueRegistry(t *testing.T) {
+	r := &Registry{}
+	if err := r.AddServer("fake", fakeServerConfig()); err != nil {
+		t.Fatalf("AddServer on a zero-value Registry: %v", err)
+	}
+	defer r.Close()
+
+	if len(r.Tools()) != 1 {
+		t.Errorf("Tools() = %+v, want one tool from the newly added server", r.Tools())
+	}
+}

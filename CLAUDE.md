@@ -266,3 +266,27 @@ the only thing that stops a still-running one, mirroring
 command that spawns its own children doesn't get orphaned either.
 Verified live, not assumed: a real `sleep 30`, confirmed dead within 5
 seconds of calling the cancel path.
+
+**Before hand-rolling a client for some external tool's protocol, check
+whether that tool already speaks a protocol chisel has a client for.**
+The plan for Go code-intelligence support (diagnostics, find-references)
+was a hand-rolled `internal/lsp` package — JSON-RPC-over-stdio framing,
+an `initialize` handshake, waiting on asynchronous `publishDiagnostics`
+notifications, two new tools — and the wire-framing layer was written
+and tested before `gopls -h` turned up a `gopls mcp` subcommand: gopls
+can run as an MCP server itself, confirmed live by hand-driving its
+stdio JSON-RPC, handing back seven real tools (`go_diagnostics`,
+`go_symbol_references`, and more) that take a *symbol name* as input
+rather than a raw line/column position a model would otherwise have to
+compute. Since `internal/mcp` already exists, fully tested, the
+hand-rolled LSP package was deleted entirely in favor of `main.go`'s
+`maybeAddGopls` auto-registering `gopls mcp` as one more MCP server —
+reusing `internal/mcp`'s server-spawning, tool-discovery, and
+permission-prompt code completely unchanged, deliberately with no
+special auto-allow treatment: MCP tools always ask (see above; chisel
+can't audit an arbitrary server's tools), and `go_rename_symbol`
+genuinely does mutate files, so the uniform rule is correct here, not a
+gap. The lesson generalizes past gopls: if a new integration means
+writing a protocol client, spend a few minutes checking whether the
+target already offers one of the protocols chisel already speaks (MCP,
+specifically) before assuming a bespoke client is needed.

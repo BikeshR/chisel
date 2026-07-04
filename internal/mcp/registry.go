@@ -85,6 +85,33 @@ func LoadAndStartAll() (*Registry, []error) {
 	return r, errs
 }
 
+// AddServer starts one additional MCP server and adds it to the
+// registry, alongside whatever LoadAndStartAll already started from
+// ~/.chisel/mcp.json — for a server chisel wants to offer automatically
+// (see main.go's gopls auto-detection) rather than requiring the user
+// to hand-configure it. Refuses to override a server the user already
+// configured under the same name: an explicit config always wins over
+// an automatic one.
+func (r *Registry) AddServer(name string, cfg ServerConfig) error {
+	if _, exists := r.servers[name]; exists {
+		return fmt.Errorf("mcp server %q is already configured", name)
+	}
+	s, err := Start(name, cfg)
+	if err != nil {
+		return err
+	}
+	if r.servers == nil {
+		// A zero-value &Registry{} (rather than one built via
+		// LoadAndStartAll, which always initializes this) is a
+		// perfectly natural way to construct one just to add a single
+		// server — don't require the caller to know about this
+		// internal detail to avoid a nil-map panic on the write below.
+		r.servers = make(map[string]*Server)
+	}
+	r.servers[name] = s
+	return nil
+}
+
 // Tools returns every tool from every running server, in chisel's
 // prefixed naming, as (name, description, inputSchema) triples ready to
 // become agent.Tool values — this package deliberately doesn't import

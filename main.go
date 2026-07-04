@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -72,6 +73,7 @@ func main() {
 	for _, e := range mcpErrs {
 		fmt.Fprintln(os.Stderr, "chisel: mcp:", e)
 	}
+	maybeAddGopls(mcpRegistry, workDir)
 	client.AddTools(agentToolsFromMCP(mcpRegistry.Tools()))
 
 	hooksCfg, hooksFound, err := hooks.LoadConfig(workDir)
@@ -217,6 +219,38 @@ func runHeadlessCore(workDir, model, prompt string) (string, agent.Usage, error)
 	return agent.RunLoop(ctx, client, history, maxHeadlessTurns, func(call agent.ToolCall) agent.ToolResult {
 		return agent.Execute(ctx, workDir, model, call, nil, nil)
 	})
+}
+
+// maybeAddGopls auto-detects a Go project (a go.mod in workDir) with
+// gopls installed and, if so, adds it as an MCP server automatically —
+// gopls's own "mcp" subcommand (added in golang.org/x/tools/gopls,
+// confirmed live: `gopls mcp` speaks real MCP over stdio) exposes real
+// Go-aware tools — go_diagnostics (parse/build errors across the
+// workspace) and go_symbol_references (find references to a symbol by
+// name, not a raw line/column position) chief among them, plus several
+// more (go_search, go_package_api, go_rename_symbol, go_vulncheck,
+// go_workspace, go_file_context) — with zero LSP-protocol code needed
+// in chisel itself: it reuses the exact same MCP client every other
+// server already goes through. Deliberately not given any special
+// auto-allow treatment the way a hand-written read-only tool would
+// get: MCP tools always need permission (see internal/tui/permission.go)
+// precisely because chisel can't audit an arbitrary server's tools —
+// and go_rename_symbol genuinely does mutate files, so the same rule
+// applying uniformly here is correct, not an oversight.
+//
+// A no-op, not an error, if there's no go.mod, gopls isn't on PATH, or
+// the user has already configured a server literally named "gopls"
+// themselves — that explicit choice always wins over this automatic one.
+func maybeAddGopls(registry *mcp.Registry, workDir string) {
+	if _, err := os.Stat(filepath.Join(workDir, "go.mod")); err != nil {
+		return
+	}
+	if _, err := exec.LookPath("gopls"); err != nil {
+		return
+	}
+	if err := registry.AddServer("gopls", mcp.ServerConfig{Command: "gopls", Args: []string{"mcp"}}); err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: gopls:", err)
+	}
 }
 
 // agentToolsFromMCP converts MCP's own tool shape to agent.Tool — kept
