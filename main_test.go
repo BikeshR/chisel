@@ -237,3 +237,103 @@ func TestRunHeadlessCorePropagatesError(t *testing.T) {
 		t.Error("expected an error from a failing request")
 	}
 }
+
+func TestConfirmPermRulesTrustAcceptsYes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	rulesPath := filepath.Join(workDir, ".chisel", "permissions.json")
+	if err := os.MkdirAll(filepath.Dir(rulesPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rulesPath, []byte(`{"bash":{"git *":"allow"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !confirmPermRulesTrustFrom(workDir, strings.NewReader("y\n")) {
+		t.Error("expected trust to be granted on 'y'")
+	}
+
+	// A second call must not re-prompt — it's already trusted.
+	if !confirmPermRulesTrustFrom(workDir, strings.NewReader("")) {
+		t.Error("expected trust to persist without needing to answer again")
+	}
+}
+
+func TestConfirmPermRulesTrustRejectsNoAndAnythingElse(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	rulesPath := filepath.Join(workDir, ".chisel", "permissions.json")
+	if err := os.MkdirAll(filepath.Dir(rulesPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rulesPath, []byte(`{"bash":{"git *":"allow"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if confirmPermRulesTrustFrom(workDir, strings.NewReader("n\n")) {
+		t.Error("expected trust to be denied on 'n'")
+	}
+	if confirmPermRulesTrustFrom(workDir, strings.NewReader("\n")) {
+		t.Error("expected trust to be denied on a bare enter")
+	}
+}
+
+func TestConfirmPermRulesTrustRePromptsOnContentChange(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	rulesPath := filepath.Join(workDir, ".chisel", "permissions.json")
+	if err := os.MkdirAll(filepath.Dir(rulesPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rulesPath, []byte(`{"bash":{"git *":"allow"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !confirmPermRulesTrustFrom(workDir, strings.NewReader("y\n")) {
+		t.Fatal("expected initial trust to be granted")
+	}
+
+	// Change the rules content — must require a fresh approval.
+	if err := os.WriteFile(rulesPath, []byte(`{"bash":{"*":"allow"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if confirmPermRulesTrustFrom(workDir, strings.NewReader("n\n")) {
+		t.Error("expected changed rules content to require re-approval, not reuse the old trust")
+	}
+}
+
+// TestConfirmHooksAndPermRulesTrustAreIndependent is why the two use
+// separate trust files (trusted_hooks.json / trusted_permrules.json):
+// approving one must never implicitly approve the other, even with
+// byte-identical content.
+func TestConfirmHooksAndPermRulesTrustAreIndependent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	content := []byte(`{"same":"content"}`)
+
+	hooksPath := filepath.Join(workDir, ".chisel", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooksPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !confirmHooksTrustFrom(workDir, strings.NewReader("y\n")) {
+		t.Fatal("expected hooks trust to be granted")
+	}
+
+	rulesPath := filepath.Join(workDir, ".chisel", "permissions.json")
+	if err := os.WriteFile(rulesPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if confirmPermRulesTrustFrom(workDir, strings.NewReader("n\n")) {
+		t.Error("trusting hooks.json must not implicitly trust permissions.json, even with identical content")
+	}
+}

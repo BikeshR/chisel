@@ -449,7 +449,7 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	}
 	looping := m.toolCallRepeatCount >= doomLoopThreshold
 
-	decision, reason := decidePermission(call, m.client.PlanMode(), m.sessionAllowlist)
+	decision, reason := decidePermission(call, m.client.PlanMode(), m.sessionAllowlist, m.permRules)
 	// A call that would otherwise run without asking (auto-allowed by
 	// default, or already on the "always allow" list) still gets
 	// escalated to a confirmation once it's repeated identically this

@@ -143,6 +143,16 @@ func (m Model) handleStatusCommand() Model {
 		m.appendLine(dimStyle.Render("hooks: none configured"))
 	}
 
+	if m.permRules.HasAny() {
+		ruleCount := 0
+		for _, rules := range m.permRules {
+			ruleCount += len(rules)
+		}
+		m.appendLine(dimStyle.Render(fmt.Sprintf("permission rules: %d rule(s) across %d tool(s)", ruleCount, len(m.permRules))))
+	} else {
+		m.appendLine(dimStyle.Render("permission rules: none configured"))
+	}
+
 	if statuses := m.mcp.Statuses(); len(statuses) == 0 {
 		m.appendLine(dimStyle.Render("mcp: no servers configured"))
 	} else {

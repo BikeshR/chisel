@@ -21,6 +21,7 @@ import (
 	"github.com/BikeshR/chisel/internal/hooks"
 	"github.com/BikeshR/chisel/internal/mcp"
 	"github.com/BikeshR/chisel/internal/memory"
+	"github.com/BikeshR/chisel/internal/permrules"
 	"github.com/BikeshR/chisel/internal/session"
 	"github.com/BikeshR/chisel/internal/skill"
 	"github.com/BikeshR/chisel/internal/tui"
@@ -82,6 +83,17 @@ func main() {
 		}
 	}
 
+	permRules, rulesFound, err := permrules.Load(workDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: permission rules:", err)
+	}
+	if rulesFound && permRules.HasAny() {
+		if !confirmPermRulesTrust(workDir) {
+			fmt.Fprintln(os.Stderr, "chisel: permission rules not trusted — running this session without them")
+			permRules = nil
+		}
+	}
+
 	memContent, memUser, memProject := memory.Load(workDir)
 	if memContent != "" {
 		client.SetMemory(memContent)
@@ -95,7 +107,7 @@ func main() {
 	}
 	skills := skill.Load(workDir)
 	client.SetSkills(skills)
-	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, memUser, memProject, customCommands, checkpointStore, skills, resumed, savedAt)
+	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, memUser, memProject, customCommands, checkpointStore, skills, permRules, resumed, savedAt)
 
 	finalModel, err := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	// A still-running bash_background command has its own context,
@@ -214,6 +226,49 @@ func confirmHooksTrustFrom(workDir string, in io.Reader) bool {
 
 	if err := hooks.Trust(hash); err != nil {
 		fmt.Fprintln(os.Stderr, "chisel: saving hooks trust decision:", err)
+	}
+	return true
+}
+
+// confirmPermRulesTrust is confirmHooksTrust's exact counterpart for
+// .chisel/permissions.json — a rule that "allow"s a call can silently
+// bypass confirmation the same way a hook can silently execute
+// arbitrary code, so loading one needs the same one-time,
+// content-hash-keyed approval (internal/permrules, backed by the same
+// internal/trust mechanism hooks uses, under its own trust file so
+// trusting one never implies trusting the other).
+func confirmPermRulesTrust(workDir string) bool {
+	return confirmPermRulesTrustFrom(workDir, os.Stdin)
+}
+
+func confirmPermRulesTrustFrom(workDir string, in io.Reader) bool {
+	path := permrules.ConfigPath(workDir)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	hash := permrules.ContentHash(data)
+
+	trusted, err := permrules.IsTrusted(hash)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: checking permission rules trust:", err)
+		return false
+	}
+	if trusted {
+		return true
+	}
+
+	fmt.Printf("chisel: %s configures persistent permission rules — some can silently allow a call (like bash) that would otherwise ask for confirmation every time.\n", path)
+	fmt.Print("Trust and apply them for this project? [y/N] ")
+
+	reader := bufio.NewReader(in)
+	line, _ := reader.ReadString('\n')
+	if answer := strings.ToLower(strings.TrimSpace(line)); answer != "y" && answer != "yes" {
+		return false
+	}
+
+	if err := permrules.Trust(hash); err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: saving permission rules trust decision:", err)
 	}
 	return true
 }

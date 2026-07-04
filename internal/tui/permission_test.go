@@ -8,11 +8,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/permrules"
 )
 
 func TestDecidePermissionAllowsReadOnlyTools(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "glob", Arguments: `{"pattern":"**/*.go"}`}}
-	decision, _ := decidePermission(call, false, nil)
+	decision, _ := decidePermission(call, false, nil, nil)
 	if decision != permissionAllow {
 		t.Errorf("decision = %v, want permissionAllow for a read-only tool", decision)
 	}
@@ -20,7 +21,7 @@ func TestDecidePermissionAllowsReadOnlyTools(t *testing.T) {
 
 func TestDecidePermissionAsksForBash(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"ls"}`}}
-	decision, _ := decidePermission(call, false, nil)
+	decision, _ := decidePermission(call, false, nil, nil)
 	if decision != permissionAsk {
 		t.Errorf("decision = %v, want permissionAsk for bash", decision)
 	}
@@ -28,7 +29,7 @@ func TestDecidePermissionAsksForBash(t *testing.T) {
 
 func TestDecidePermissionDeniesInPlanMode(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"ls"}`}}
-	decision, reason := decidePermission(call, true, nil)
+	decision, reason := decidePermission(call, true, nil, nil)
 	if decision != permissionDeny {
 		t.Errorf("decision = %v, want permissionDeny in plan mode", decision)
 	}
@@ -40,7 +41,7 @@ func TestDecidePermissionDeniesInPlanMode(t *testing.T) {
 func TestDecidePermissionPlanModeOverridesAllowlist(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"ls"}`}}
 	allowlist := map[string]bool{"bash:ls": true}
-	decision, _ := decidePermission(call, true, allowlist)
+	decision, _ := decidePermission(call, true, allowlist, nil)
 	if decision != permissionDeny {
 		t.Errorf("decision = %v, want permissionDeny — plan mode must override even an allowlisted command", decision)
 	}
@@ -49,7 +50,7 @@ func TestDecidePermissionPlanModeOverridesAllowlist(t *testing.T) {
 func TestDecidePermissionAllowsAllowlistedBashCommand(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"go test ./..."}`}}
 	allowlist := map[string]bool{"bash:go test ./...": true}
-	decision, _ := decidePermission(call, false, allowlist)
+	decision, _ := decidePermission(call, false, allowlist, nil)
 	if decision != permissionAllow {
 		t.Errorf("decision = %v, want permissionAllow for an allowlisted command", decision)
 	}
@@ -58,7 +59,7 @@ func TestDecidePermissionAllowsAllowlistedBashCommand(t *testing.T) {
 func TestDecidePermissionAllowlistIsExactCommandMatch(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"go test ./... -v"}`}}
 	allowlist := map[string]bool{"bash:go test ./...": true}
-	decision, _ := decidePermission(call, false, allowlist)
+	decision, _ := decidePermission(call, false, allowlist, nil)
 	if decision != permissionAsk {
 		t.Errorf("decision = %v, want permissionAsk — a different command string must not match", decision)
 	}
@@ -307,5 +308,77 @@ func TestPermissionPromptOmitsCwdWhenUnchanged(t *testing.T) {
 		if strings.Contains(l, "(in ") {
 			t.Errorf("lines = %+v, want no cwd hint when the shell never left workDir", lines)
 		}
+	}
+}
+
+func TestDecidePermissionRuleAllowsBashCommand(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"git status"}`}}
+	rules := permrules.Config{"bash": permrules.RuleList{{Pattern: "git *", Decision: permrules.Allow}}}
+
+	decision, _ := decidePermission(call, false, nil, rules)
+	if decision != permissionAllow {
+		t.Errorf("decision = %v, want permissionAllow — a matching allow rule", decision)
+	}
+}
+
+func TestDecidePermissionRuleDeniesBashCommand(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"rm -rf /tmp/x"}`}}
+	rules := permrules.Config{"bash": permrules.RuleList{{Pattern: "rm -rf *", Decision: permrules.Deny}}}
+
+	decision, reason := decidePermission(call, false, nil, rules)
+	if decision != permissionDeny {
+		t.Errorf("decision = %v, want permissionDeny — a matching deny rule", decision)
+	}
+	if !strings.Contains(reason, "permissions.json") {
+		t.Errorf("reason = %q, want it to mention permissions.json", reason)
+	}
+}
+
+// TestDecidePermissionDenyRuleOverridesEvenAnAutoAllowedTool: a deny
+// rule making something *more* restrictive should apply regardless of
+// what the call would otherwise need — chisel doesn't currently offer
+// rules for auto-allowed tools like glob, but the precedence itself
+// (deny checked before the normal needsPermission path) must hold for
+// any tool name a rule names.
+func TestDecidePermissionDenyRuleOverridesNormalAutoAllow(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash_background", Arguments: `{"command":"curl evil.example"}`}}
+	rules := permrules.Config{"bash_background": permrules.RuleList{{Pattern: "curl *", Decision: permrules.Deny}}}
+
+	decision, _ := decidePermission(call, false, nil, rules)
+	if decision != permissionDeny {
+		t.Errorf("decision = %v, want permissionDeny", decision)
+	}
+}
+
+func TestDecidePermissionPlanModeOverridesAllowRule(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"git status"}`}}
+	rules := permrules.Config{"bash": permrules.RuleList{{Pattern: "git *", Decision: permrules.Allow}}}
+
+	decision, _ := decidePermission(call, true, nil, rules)
+	if decision != permissionDeny {
+		t.Errorf("decision = %v, want permissionDeny — plan mode must override even a matching allow rule", decision)
+	}
+}
+
+func TestDecidePermissionLastMatchingRuleWins(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"git push --force origin main"}`}}
+	rules := permrules.Config{"bash": permrules.RuleList{
+		{Pattern: "git *", Decision: permrules.Allow},
+		{Pattern: "git push --force*", Decision: permrules.Deny},
+	}}
+
+	decision, _ := decidePermission(call, false, nil, rules)
+	if decision != permissionDeny {
+		t.Errorf("decision = %v, want permissionDeny — the more specific, later rule should win", decision)
+	}
+}
+
+func TestDecidePermissionNoMatchingRuleFallsThroughToNormalAsk(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"npm install"}`}}
+	rules := permrules.Config{"bash": permrules.RuleList{{Pattern: "git *", Decision: permrules.Allow}}}
+
+	decision, _ := decidePermission(call, false, nil, rules)
+	if decision != permissionAsk {
+		t.Errorf("decision = %v, want permissionAsk — no rule matched, bash normally needs confirmation", decision)
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/BikeshR/chisel/internal/gitutil"
 	"github.com/BikeshR/chisel/internal/hooks"
 	"github.com/BikeshR/chisel/internal/mcp"
+	"github.com/BikeshR/chisel/internal/permrules"
 	"github.com/BikeshR/chisel/internal/session"
 	"github.com/BikeshR/chisel/internal/skill"
 )
@@ -44,11 +45,12 @@ const (
 // enough UI state to render the transcript, a spinner, and a permission
 // prompt.
 type Model struct {
-	client  *agent.Client
-	workDir string
-	bash    *agent.BashSession
-	mcp     *mcp.Registry
-	hooks   hooks.Config
+	client    *agent.Client
+	workDir   string
+	bash      *agent.BashSession
+	mcp       *mcp.Registry
+	hooks     hooks.Config
+	permRules permrules.Config
 	// memUser/memProject record which CHISEL.md files were found at
 	// startup (see New) — kept only for /status to report later; the
 	// content itself already went to the client via SetMemory before
@@ -227,8 +229,10 @@ func interruptibleErrorText(err error) string {
 // skills comes from skill.Load — a nil/empty map is fine and just means
 // load_skill has nothing to find. Callers should also have already
 // passed the same map to client.SetSkills before constructing here, so
-// the system prompt and the tool's actual lookup stay in sync.
-func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, customCommands map[string]customcmd.Command, checkpointStore *checkpoint.Store, skills map[string]skill.Skill, resumed []agent.Message, savedAt time.Time) Model {
+// the system prompt and the tool's actual lookup stay in sync. permRules
+// comes from permrules.Load — a nil/empty Config is fine and just means
+// no persistent rules are configured, same as an absent hooks.json.
+func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, customCommands map[string]customcmd.Command, checkpointStore *checkpoint.Store, skills map[string]skill.Skill, permRules permrules.Config, resumed []agent.Message, savedAt time.Time) Model {
 	ta := textarea.New()
 	ta.Placeholder = "ask chisel to do something… (alt+enter for a new line, @path to reference a file, !cmd to run a shell command directly, /help for commands)"
 	ta.Focus()
@@ -252,6 +256,7 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 		bash:            bash,
 		mcp:             mcpRegistry,
 		hooks:           hooksCfg,
+		permRules:       permRules,
 		memUser:         memUser,
 		memProject:      memProject,
 		customCommands:  customCommands,

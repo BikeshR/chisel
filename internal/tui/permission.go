@@ -3,9 +3,11 @@ package tui
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 
 	"github.com/BikeshR/chisel/internal/agent"
 	"github.com/BikeshR/chisel/internal/mcp"
+	"github.com/BikeshR/chisel/internal/permrules"
 )
 
 // permissionDecision is the outcome of checking whether a tool call may
@@ -30,13 +32,27 @@ const (
 )
 
 // decidePermission is the single place that decides allow/ask/deny for
-// a tool call about to be dispatched. allowlist is checked only for
-// calls that would otherwise need confirmation, and only after the plan
-// mode check — plan mode is meant to be an absolute guarantee that
-// nothing runs, so a call the user previously always-allowed must still
-// be blocked while plan mode is on, not silently exempted from it.
-func decidePermission(call agent.ToolCall, planMode bool, allowlist map[string]bool) (decision permissionDecision, reason string) {
+// a tool call about to be dispatched. Persistent rules (rules,
+// .chisel/permissions.json — see internal/permrules) are checked
+// first: a "deny" rule always wins, even over a call that would
+// otherwise be auto-allowed, since making something *more* restrictive
+// never conflicts with anything else here. An "allow" rule is checked
+// next, but still loses to plan mode, same as the in-memory
+// session-only allowlist below it — plan mode is meant to be an
+// absolute guarantee that nothing runs, so a rule (or a previous
+// always-allow decision) must still be blocked while it's on, not
+// silently exempted from it.
+func decidePermission(call agent.ToolCall, planMode bool, allowlist map[string]bool, rules permrules.Config) (decision permissionDecision, reason string) {
 	needsConfirmation := needsPermission(call)
+
+	if ruleDecision, matched := matchPermissionRules(rules, call); matched {
+		if ruleDecision == permrules.Deny {
+			return permissionDeny, fmt.Sprintf("Not run — a rule in .chisel/permissions.json denies %s.", summarizeCall(call))
+		}
+		if !needsConfirmation || !planMode {
+			return permissionAllow, ""
+		}
+	}
 
 	if needsConfirmation && planMode {
 		return permissionDeny, "Not run — chisel is in plan mode, which only allows read-only exploration. Describe this as part of your plan instead, then stop; the user will exit plan mode before you make any changes."
@@ -48,6 +64,26 @@ func decidePermission(call agent.ToolCall, planMode bool, allowlist map[string]b
 		return permissionAsk, ""
 	}
 	return permissionAllow, ""
+}
+
+// matchPermissionRules extracts the text a rule's pattern should match
+// against for call, and checks it against rules — currently just bash
+// and bash_background, matched against the command text itself; other
+// tools have no natural single string to match a shell-style glob
+// against, so they're left to the normal allow/ask/deny path.
+func matchPermissionRules(rules permrules.Config, call agent.ToolCall) (permrules.Decision, bool) {
+	switch call.Function.Name {
+	case "bash", "bash_background":
+		var in struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &in); err != nil || in.Command == "" {
+			return "", false
+		}
+		return permrules.Match(rules, call.Function.Name, in.Command)
+	default:
+		return "", false
+	}
 }
 
 // doomLoopThreshold is how many identical calls in a row (see
