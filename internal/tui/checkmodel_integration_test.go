@@ -3,8 +3,11 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"testing"
+
+	"github.com/BikeshR/chisel/internal/agent"
 )
 
 func TestIntegrationCheckModel(t *testing.T) {
@@ -12,7 +15,7 @@ func TestIntegrationCheckModel(t *testing.T) {
 		t.Skip("CHISEL_API_KEY not set — skipping integration test")
 	}
 
-	cmd := checkModel("minimax-m3")
+	cmd := checkModel(context.Background(), agent.New("minimax-m3"), "minimax-m3")
 	msg := cmd() // tea.Cmd is just a func() tea.Msg — safe to call directly in a test
 
 	result, ok := msg.(modelCheckResultMsg)
@@ -35,7 +38,7 @@ func TestIntegrationCheckModelBrokenModel(t *testing.T) {
 	// deepseek-v4-flash failed with a generic upstream error during this
 	// project's development (see docs/design.md) — confirms checkModel
 	// surfaces a real failure as an error, not a false positive.
-	cmd := checkModel("deepseek-v4-flash")
+	cmd := checkModel(context.Background(), agent.New("deepseek-v4-flash"), "deepseek-v4-flash")
 	msg := cmd()
 
 	result, ok := msg.(modelCheckResultMsg)

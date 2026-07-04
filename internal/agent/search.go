@@ -14,6 +14,7 @@ import (
 )
 
 const grepResultLimit = 200
+const globResultLimit = 200
 
 var skipDirs = map[string]bool{
 	".git": true, "node_modules": true, "vendor": true, ".venv": true,
@@ -79,8 +80,15 @@ func runGlob(workDir string, rawInput json.RawMessage) (string, error) {
 	// os.DirFS doesn't defend against symlinks pointing outside workDir
 	// (its own docs say as much) — filter out anything that resolves
 	// elsewhere, the same check every other filesystem tool goes through.
+	// Also apply skipDirs here — unlike runGrep's filepath.WalkDir,
+	// doublestar.Glob has no directory-pruning hook of its own, so a
+	// pattern like "**/*.js" in a repo with node_modules would otherwise
+	// return everything underneath it too.
 	safe := matches[:0]
 	for _, m := range matches {
+		if pathHasSkipDir(m) {
+			continue
+		}
 		if _, err := resolveInWorkDir(workDir, m); err == nil {
 			safe = append(safe, m)
 		}
@@ -91,7 +99,23 @@ func runGlob(workDir string, rawInput json.RawMessage) (string, error) {
 		return "(no matches)", nil
 	}
 	sort.Strings(matches)
+
+	if len(matches) > globResultLimit {
+		shown := matches[:globResultLimit]
+		return fmt.Sprintf("%s\n… truncated at %d matches (%d more)", strings.Join(shown, "\n"), globResultLimit, len(matches)-globResultLimit), nil
+	}
 	return strings.Join(matches, "\n"), nil
+}
+
+// pathHasSkipDir reports whether any path segment of p (fs.FS-style,
+// always "/"-separated regardless of OS) is one of skipDirs.
+func pathHasSkipDir(p string) bool {
+	for _, part := range strings.Split(p, "/") {
+		if skipDirs[part] {
+			return true
+		}
+	}
+	return false
 }
 
 func runGrep(workDir string, rawInput json.RawMessage) (string, error) {
@@ -111,7 +135,15 @@ func runGrep(workDir string, rawInput json.RawMessage) (string, error) {
 	var results []string
 	err = filepath.WalkDir(workDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return err
+			// A permission-denied (or similarly unreadable) directory or
+			// file must not abort the whole walk — one root-owned
+			// subdirectory (a docker volume mount, a stray .cache with
+			// odd perms) would otherwise make grep fail across the
+			// entire repo instead of just skipping that one entry.
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if len(results) >= grepResultLimit {
 			return filepath.SkipAll
@@ -186,7 +218,18 @@ func isBinary(f *os.File) bool {
 	buf := make([]byte, 512)
 	n, _ := f.Read(buf)
 	defer func() { _, _ = f.Seek(0, 0) }()
-	for _, b := range buf[:n] {
+	return looksBinary(buf[:n])
+}
+
+// looksBinary applies the same NUL-byte heuristic as isBinary directly
+// to an in-memory buffer, for callers (viewPath, in editor.go) that
+// already have the full content read rather than an open file handle.
+func looksBinary(data []byte) bool {
+	limit := len(data)
+	if limit > 512 {
+		limit = 512
+	}
+	for _, b := range data[:limit] {
 		if b == 0 {
 			return true
 		}

@@ -60,6 +60,66 @@ func TestDirtyPaths(t *testing.T) {
 	}
 }
 
+// TestDirtyPathsHandlesUnicodeAndSpecialFilenames is the regression
+// test for why DirtyPaths uses `git status --porcelain -z`: without -z,
+// git C-quotes non-ASCII and otherwise "unusual" filenames in the
+// plain-text porcelain output, and the old strings.Trim(path, `"`)
+// unwrapped only the surrounding quotes, not the escaping inside them —
+// a name with a literal quote or backslash would come out wrong.
+func TestDirtyPathsHandlesUnicodeAndSpecialFilenames(t *testing.T) {
+	dir := initRepo(t)
+
+	names := []string{"café.txt", `has"quote.txt`, "emoji😀.txt"}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	paths, err := DirtyPaths(dir)
+	if err != nil {
+		t.Fatalf("DirtyPaths: %v", err)
+	}
+	for _, name := range names {
+		if !paths[name] {
+			t.Errorf("paths = %v, want %q present exactly as written", paths, name)
+		}
+	}
+}
+
+// TestDirtyPathsHandlesRenames confirms the new -z-based rename
+// handling (new path, then a NUL-separated original path field to skip
+// over) reports the renamed file under its new name, not the old one
+// and not the old-path field misread as a second, bogus entry.
+func TestDirtyPathsHandlesRenames(t *testing.T) {
+	dir := initRepo(t)
+
+	if err := os.WriteFile(filepath.Join(dir, "old.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("add", "old.txt")
+	run("commit", "-m", "add old.txt")
+	run("mv", "old.txt", "new.txt")
+
+	paths, err := DirtyPaths(dir)
+	if err != nil {
+		t.Fatalf("DirtyPaths: %v", err)
+	}
+	if !paths["new.txt"] {
+		t.Errorf("paths = %v, want new.txt present", paths)
+	}
+	if paths["old.txt"] {
+		t.Errorf("paths = %v, want old.txt absent (that's the original-path field, not a real dirty path)", paths)
+	}
+}
+
 func TestCommitNewlyChanged(t *testing.T) {
 	dir := initRepo(t)
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0o644); err != nil {

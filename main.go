@@ -26,6 +26,14 @@ const defaultModel = "minimax-m3"
 func main() {
 	loadDotEnv()
 
+	// Checked here, not left to surface as the first request's raw 401 —
+	// that failure mode gives no indication of what's actually wrong,
+	// especially once it's buried behind a spinner and a stream error.
+	if os.Getenv("CHISEL_API_KEY") == "" {
+		fmt.Fprintln(os.Stderr, "chisel: CHISEL_API_KEY is not set — set it in your environment or in ~/.chisel.env")
+		os.Exit(1)
+	}
+
 	workDir, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "chisel: resolve working directory:", err)
@@ -116,6 +124,22 @@ func loadDotEnv() {
 		if _, set := os.LookupEnv(key); set {
 			continue // real environment wins
 		}
-		_ = os.Setenv(key, strings.TrimSpace(value)) // key came from our own trusted config file
+		_ = os.Setenv(key, unquote(strings.TrimSpace(value))) // key came from our own trusted config file
 	}
+}
+
+// unquote strips one layer of matching surrounding quotes (single or
+// double) from s, if present — CHISEL_API_KEY="sk-..." in ~/.chisel.env
+// is a natural thing to write (shell-style, and what most .env-adjacent
+// tooling accepts), but without this the literal quote characters would
+// end up as part of the value and every request would fail
+// authentication with no clue why.
+func unquote(s string) string {
+	if len(s) < 2 {
+		return s
+	}
+	if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+		return s[1 : len(s)-1]
+	}
+	return s
 }

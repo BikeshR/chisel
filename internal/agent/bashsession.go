@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -103,6 +104,12 @@ func (s *BashSession) Cwd() string {
 func (s *BashSession) start() error {
 	cmd := exec.Command("sh")
 	cmd.Dir = s.workDir
+	// Its own process group, so stop() can kill every descendant a
+	// command spawned (a backgrounded `npm run dev`, a forked build
+	// daemon) — without this, killing only the `sh` process itself on
+	// timeout left orphaned children running indefinitely, invisibly
+	// holding whatever port or lock they'd acquired.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -142,7 +149,11 @@ func (s *BashSession) stop() {
 		return
 	}
 	_ = s.stdin.Close()
-	_ = s.cmd.Process.Kill()
+	// Negative PID targets the whole process group (see start's
+	// Setpgid) rather than just the shell itself — a plain
+	// cmd.Process.Kill() would leave anything the shell had spawned
+	// (and not waited on) still running after the session is gone.
+	_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
 	_ = s.cmd.Wait()
 	s.cmd = nil
 	s.stdin = nil
@@ -184,6 +195,17 @@ func (s *BashSession) run(ctx context.Context, command string) (string, error) {
 	}
 	done := make(chan result, 1)
 
+	// partial mirrors the goroutine's own output builder so a timeout
+	// (below) can report whatever the command had printed up to that
+	// point, instead of discarding it — a command that hangs after
+	// producing useful diagnostics used to leave the model with nothing
+	// to go on but "timed out". Guarded by its own mutex since the
+	// goroutine keeps running (and keeps writing to it) after run
+	// returns on timeout; this isn't reused for the done-channel path,
+	// which has no such race.
+	var partialMu sync.Mutex
+	var partial strings.Builder
+
 	go func() {
 		var out strings.Builder
 		for {
@@ -199,6 +221,9 @@ func (s *BashSession) run(ctx context.Context, command string) (string, error) {
 				return
 			}
 			out.WriteString(line)
+			partialMu.Lock()
+			partial.WriteString(line)
+			partialMu.Unlock()
 			if readErr != nil {
 				done <- result{output: out.String(), err: fmt.Errorf("shell session ended: %w", readErr)}
 				return
@@ -225,7 +250,16 @@ func (s *BashSession) run(ctx context.Context, command string) (string, error) {
 		// since a caller-cancelled ctx should read as "interrupted", not
 		// "timed out", even though both derive the same Done() signal.
 		if ctx.Err() != nil {
+			// Returned bare (not wrapped with any partial output) so it
+			// stays exactly context.Canceled — the TUI's interrupted-vs-
+			// error display matches on that value directly.
 			return "", ctx.Err()
+		}
+		partialMu.Lock()
+		partialOutput := partial.String()
+		partialMu.Unlock()
+		if partialOutput != "" {
+			return "", fmt.Errorf("command timed out after %s; output so far:\n%s", bashCommandTimeout, partialOutput)
 		}
 		return "", fmt.Errorf("command timed out after %s", bashCommandTimeout)
 	}

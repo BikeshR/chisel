@@ -89,7 +89,6 @@ type Model struct {
 	// now", since every request resends the full history.
 	lastContextTokens int64
 	width, height     int
-	err               error
 	quitting          bool
 
 	// cancelTurn cancels whatever's currently in flight (a model request,
@@ -405,12 +404,18 @@ func lastUserText(messages []agent.Message) string {
 const compactPrompt = "Summarize this conversation so far in a concise form for continuing the work later: the overall goal, key decisions made, files created or modified and how, and anything still unresolved. Skip narration and pleasantries — just the substance needed to pick back up."
 
 // compact sends messages plus the compaction instruction and returns the
-// model's summary.
+// model's summary. Uses client.WithoutTools() — this request has no
+// legitimate reason to call any tool, and a model that decided to call
+// one anyway (tool-happy models asked to "summarize... files created or
+// modified" are a real, not just hypothetical, failure mode) would
+// otherwise return empty content that silently replaces the whole
+// conversation with nothing. The explicit check below is the backstop
+// for a model that ignores the empty tool set and calls one anyway.
 func compact(ctx context.Context, client *agent.Client, messages []agent.Message) tea.Cmd {
 	return func() tea.Msg {
 		history := append(append([]agent.Message{}, messages...), agent.Message{Role: "user", Content: compactPrompt})
 
-		ch, err := client.SendStreaming(ctx, history)
+		ch, err := client.WithoutTools().SendStreaming(ctx, history)
 		if err != nil {
 			return compactResultMsg{err: err}
 		}
@@ -418,6 +423,12 @@ func compact(ctx context.Context, client *agent.Client, messages []agent.Message
 		msg, usage, err := agent.Drain(ch)
 		if err != nil {
 			return compactResultMsg{err: err}
+		}
+		if msg.Content == "" || len(msg.ToolCalls) > 0 {
+			return compactResultMsg{
+				err:   errors.New("model returned no plain-text summary (empty content or a tool call) — the conversation was left untouched; try again or use /new instead"),
+				usage: usage,
+			}
 		}
 		return compactResultMsg{summary: msg.Content, usage: usage}
 	}

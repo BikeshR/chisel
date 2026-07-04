@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -73,6 +74,9 @@ func viewPath(path string, viewRange []int) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if looksBinary(data) {
+		return "", fmt.Errorf("%s appears to be a binary file — view only supports text", path)
+	}
 	lines := strings.Split(string(data), "\n")
 
 	start, end := 1, len(lines)
@@ -96,15 +100,17 @@ func viewPath(path string, viewRange []int) (string, error) {
 	return b.String(), nil
 }
 
+// createFile writes content to path, creating any missing intermediate
+// directories along the way (resolveInWorkDir validates where a
+// not-yet-existing nested path would land, but doesn't create anything
+// itself — that's this function's job). No .bak backup on overwrite —
+// that behavior predates the permission prompt's diff preview and
+// /git auto; with both in place, a backup file chisel never mentions,
+// never cleans up, and /git auto happily commits alongside everything
+// else had lost its reason to exist.
 func createFile(path, content string) (string, error) {
-	if _, err := os.Stat(path); err == nil {
-		existing, err := os.ReadFile(path)
-		if err != nil {
-			return "", err
-		}
-		if err := os.WriteFile(path+".bak", existing, 0o644); err != nil {
-			return "", fmt.Errorf("backing up existing file: %w", err)
-		}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", fmt.Errorf("create parent directory: %w", err)
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", err

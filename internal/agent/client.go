@@ -112,6 +112,34 @@ func (c *Client) PlanMode() bool {
 	return c.planMode
 }
 
+// Clone returns a copy of c for model — same tools (including any added
+// via AddTools) and memory, but not plan mode, since a clone's only
+// current use (checkModel, for /model check) is a one-off "does this
+// model even work" probe, not a real turn where plan mode would matter.
+// Exists so /model check tests a candidate model through chisel's real
+// request shape instead of a bare client with none of that context —
+// the same class of failure (a provider rejecting the tool set
+// outright) can differ once MCP servers are actually configured.
+func (c *Client) Clone(model string) *Client {
+	clone := *c
+	clone.model = model
+	clone.planMode = false
+	return &clone
+}
+
+// WithoutTools returns a copy of c with no tools declared — used by
+// /compact, whose one request just wants a plain-text summary and has
+// no legitimate reason to call any tool. A model can, in principle,
+// still return a tool call despite none being declared, so this narrows
+// the failure mode rather than eliminating it outright — callers should
+// still guard against an empty or tool-call response (see compact in
+// tui/model.go).
+func (c *Client) WithoutTools() *Client {
+	clone := *c
+	clone.tools = nil
+	return &clone
+}
+
 // SetMemory sets the CHISEL.md content (see internal/memory) appended to
 // the system prompt sent with every request from here on. Pass "" to
 // clear it.

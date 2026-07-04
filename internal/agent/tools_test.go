@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func call(name, argsJSON string) ToolCall {
@@ -93,6 +96,9 @@ func TestResolveInWorkDir(t *testing.T) {
 		{"relative path to existing file", "existing.txt", false},
 		{"relative path in subdirectory", "subdir/new.txt", false},
 		{"not-yet-existing file to create", "new-file.txt", false},
+		{"nested path under a directory that doesn't exist yet", "newdir/newsub/new.go", false},
+		{"deeply nested path under several missing directories", "a/b/c/d/new.go", false},
+		{"nested traversal past a missing directory is still rejected", "newdir/../../escape.txt", true},
 		{"empty path rejected", "", true},
 		{"simple traversal rejected", "../escape.txt", true},
 		{"nested traversal rejected", "subdir/../../escape.txt", true},
@@ -124,5 +130,78 @@ func TestResolveInWorkDirSymlinkEscape(t *testing.T) {
 	_, err := resolveInWorkDir(workDir, "escape-link/secret.txt")
 	if err == nil {
 		t.Error("expected a symlink escaping workDir to be rejected, got nil error")
+	}
+}
+
+func TestTruncateOutputLeavesShortContentUnchanged(t *testing.T) {
+	short := "hello world"
+	if got := truncateOutput(short); got != short {
+		t.Errorf("truncateOutput(%q) = %q, want unchanged", short, got)
+	}
+}
+
+func TestTruncateOutputCutsAtRuneBoundary(t *testing.T) {
+	// Each "é" is two UTF-8 bytes but one rune — a byte-based cut at
+	// maxToolOutputChars could land mid-character and produce invalid
+	// UTF-8; this confirms the cut is rune-based instead.
+	long := strings.Repeat("é", maxToolOutputChars+100)
+	got := truncateOutput(long)
+	if !utf8.ValidString(got) {
+		t.Fatal("truncateOutput produced invalid UTF-8")
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Errorf("got = %q, want a truncation marker", got[len(got)-60:])
+	}
+}
+
+func TestRunEditorCreateNestedDirectories(t *testing.T) {
+	workDir := t.TempDir()
+	input, _ := json.Marshal(editorInput{Command: "create", Path: "a/b/c/new.go", FileText: "package main\n"})
+
+	out, err := runEditor(workDir, input)
+	if err != nil {
+		t.Fatalf("runEditor create: %v", err)
+	}
+	if !strings.Contains(out, "new.go") {
+		t.Errorf("output = %q", out)
+	}
+
+	data, err := os.ReadFile(filepath.Join(workDir, "a", "b", "c", "new.go"))
+	if err != nil {
+		t.Fatalf("expected the nested file to have been created: %v", err)
+	}
+	if string(data) != "package main\n" {
+		t.Errorf("content = %q", data)
+	}
+}
+
+// TestRunEditorCreateOverwriteDoesNotLeaveBackupFile is the regression
+// test for removing createFile's .bak behavior — it predates the
+// permission prompt's diff preview and /git auto, and with both in
+// place a backup file chisel never mentions and never cleans up (and
+// that /git auto would happily commit alongside everything else) had
+// lost its reason to exist.
+func TestRunEditorCreateOverwriteDoesNotLeaveBackupFile(t *testing.T) {
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "existing.go")
+	if err := os.WriteFile(path, []byte("package old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	input, _ := json.Marshal(editorInput{Command: "create", Path: "existing.go", FileText: "package new\n"})
+	if _, err := runEditor(workDir, input); err != nil {
+		t.Fatalf("runEditor create: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "package new\n" {
+		t.Errorf("content = %q, want the file overwritten", data)
+	}
+
+	if _, err := os.Stat(path + ".bak"); err == nil {
+		t.Error("a .bak file was created — that behavior should be gone")
 	}
 }

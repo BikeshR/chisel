@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -114,6 +116,38 @@ func TestIsToolName(t *testing.T) {
 		if got := IsToolName(name); got != want {
 			t.Errorf("IsToolName(%q) = %v, want %v", name, got, want)
 		}
+	}
+}
+
+// TestLoadAndStartAllRejectsServerNameContainingDoubleUnderscore is the
+// regression test for a real routing bug: SplitToolName cuts a prefixed
+// tool name at the *first* "__", so a server literally named
+// "my__server" would misroute every one of its own tools (the cut lands
+// between "my" and "server__tool", not between the server and the
+// tool). Rejecting the name at load time is cheaper and clearer than
+// ever letting such a server register.
+func TestLoadAndStartAllRejectsServerNameContainingDoubleUnderscore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	path := filepath.Join(home, ".chisel", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"mcpServers":{"my__server":{"command":"echo","args":["hi"]}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r, errs := LoadAndStartAll()
+	if len(errs) != 1 {
+		t.Fatalf("got %d errors, want exactly 1: %v", len(errs), errs)
+	}
+	if !strings.Contains(errs[0].Error(), "__") {
+		t.Errorf("error = %v, want it to mention the \"__\" restriction", errs[0])
+	}
+	if len(r.servers) != 0 {
+		t.Errorf("registry has %d servers, want 0 — the malformed name shouldn't have started", len(r.servers))
 	}
 }
 

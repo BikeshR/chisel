@@ -19,14 +19,36 @@ func withHome(t *testing.T) string {
 
 func TestSanitize(t *testing.T) {
 	cases := map[string]string{
-		"/home/brana/code/chisel": "home-brana-code-chisel",
-		"/":                       "root",
-		"/a/b/c":                  "a-b-c",
+		"/home/brana/code/chisel": "home-brana-code-chisel-",
+		"/":                       "root-",
+		"/a/b/c":                  "a-b-c-",
 	}
-	for in, want := range cases {
-		if got := sanitize(in); got != want {
-			t.Errorf("sanitize(%q) = %q, want %q", in, got, want)
+	for in, wantPrefix := range cases {
+		if got := sanitize(in); !strings.HasPrefix(got, wantPrefix) {
+			t.Errorf("sanitize(%q) = %q, want it to start with %q", in, got, wantPrefix)
 		}
+	}
+}
+
+func TestSanitizeIsDeterministic(t *testing.T) {
+	const path = "/home/brana/code/chisel"
+	first := sanitize(path)
+	second := sanitize(path)
+	if first != second {
+		t.Errorf("sanitize(%q) = %q then %q, want the same value both times", path, first, second)
+	}
+}
+
+// TestSanitizeAvoidsCollisionsFromDifferentDirectoryStructures is the
+// regression test for a real bug: readable-only sanitization collapsed
+// distinct directories like /home/x/a-b and /home/x/a/b to the exact
+// same string ("home-x-a-b"), so resuming a session in one would
+// silently load (and overwrite) the other's conversation.
+func TestSanitizeAvoidsCollisionsFromDifferentDirectoryStructures(t *testing.T) {
+	a := sanitize("/home/x/a-b")
+	b := sanitize("/home/x/a/b")
+	if a == b {
+		t.Errorf("sanitize(%q) and sanitize(%q) collided: both %q", "/home/x/a-b", "/home/x/a/b", a)
 	}
 }
 

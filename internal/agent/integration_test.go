@@ -110,7 +110,7 @@ func TestIntegrationRunSubagent(t *testing.T) {
 		t.Skip("CHISEL_API_KEY not set — skipping integration test")
 	}
 
-	summary, err := RunSubagent(context.Background(), ".", "minimax-m3",
+	summary, usage, err := RunSubagent(context.Background(), ".", "minimax-m3",
 		"Find where the BashSession type is defined in this Go codebase and say which file it's in.")
 	if err != nil {
 		t.Fatalf("RunSubagent: %v", err)
@@ -120,5 +120,8 @@ func TestIntegrationRunSubagent(t *testing.T) {
 	}
 	if !strings.Contains(summary, "bashsession.go") {
 		t.Errorf("summary = %q, want it to correctly identify bashsession.go", summary)
+	}
+	if usage.InputTokens == 0 {
+		t.Error("expected non-zero usage plumbed back from a real subagent run")
 	}
 }

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,6 +60,44 @@ func TestRunGrepStillFindsRealMatches(t *testing.T) {
 	}
 }
 
+// TestRunGrepSurvivesUnreadableDirectory is the regression test for a
+// walk-abort bug: filepath.WalkDir's callback used to return the raw
+// error for *any* problem reaching an entry, which aborts the entire
+// walk — one permission-denied subdirectory (a root-owned docker volume
+// mount, an odd .cache) made grep fail across the whole repo instead of
+// just skipping that one directory.
+func TestRunGrepSurvivesUnreadableDirectory(t *testing.T) {
+	workDir := t.TempDir()
+
+	blocked := filepath.Join(workDir, "blocked")
+	if err := os.Mkdir(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocked, "inside.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(blocked, 0o755) }() // let t.TempDir's cleanup remove it
+
+	if err := os.WriteFile(filepath.Join(workDir, "findme.txt"), []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	input, _ := json.Marshal(struct {
+		Pattern string `json:"pattern"`
+	}{Pattern: "hello"})
+
+	out, err := runGrep(workDir, input)
+	if err != nil {
+		t.Fatalf("runGrep: %v (want it to skip the unreadable directory, not fail entirely)", err)
+	}
+	if !strings.Contains(out, "findme.txt") {
+		t.Errorf("output = %q, want the match outside the unreadable directory to still be found", out)
+	}
+}
+
 func TestRunGlobRejectsSymlinkEscape(t *testing.T) {
 	workDir := t.TempDir()
 	outsideDir := t.TempDir()
@@ -81,5 +120,55 @@ func TestRunGlobRejectsSymlinkEscape(t *testing.T) {
 	}
 	if strings.Contains(out, "secret") {
 		t.Errorf("output = %q, want the escaping symlinked directory's contents excluded", out)
+	}
+}
+
+func TestRunGlobExcludesSkipDirs(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workDir, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "node_modules", "dep.js"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "app.js"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	input, _ := json.Marshal(struct {
+		Pattern string `json:"pattern"`
+	}{Pattern: "**/*.js"})
+
+	out, err := runGlob(workDir, input)
+	if err != nil {
+		t.Fatalf("runGlob: %v", err)
+	}
+	if strings.Contains(out, "node_modules") {
+		t.Errorf("output = %q, want node_modules excluded", out)
+	}
+	if !strings.Contains(out, "app.js") {
+		t.Errorf("output = %q, want app.js (outside node_modules) included", out)
+	}
+}
+
+func TestRunGlobCapsResults(t *testing.T) {
+	workDir := t.TempDir()
+	for i := 0; i < globResultLimit+25; i++ {
+		name := fmt.Sprintf("file%03d.txt", i)
+		if err := os.WriteFile(filepath.Join(workDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	input, _ := json.Marshal(struct {
+		Pattern string `json:"pattern"`
+	}{Pattern: "*.txt"})
+
+	out, err := runGlob(workDir, input)
+	if err != nil {
+		t.Fatalf("runGlob: %v", err)
+	}
+	if !strings.Contains(out, "truncated") || !strings.Contains(out, "25 more") {
+		t.Errorf("output tail = %q, want a truncation marker mentioning 25 more matches", out[len(out)-80:])
 	}
 }

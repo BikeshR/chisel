@@ -34,6 +34,11 @@ type ToolResult struct {
 	ID      string
 	Content string
 	IsError bool
+	// Usage is non-zero only for tools that make their own model
+	// requests under the hood (dispatch_subagent) — everywhere else it's
+	// the zero value, contributing nothing when a caller adds it into a
+	// running total.
+	Usage Usage
 }
 
 // ErrorContentPrefix marks a tool result's content as an error when
@@ -117,6 +122,7 @@ func Summarize(call ToolCall) string {
 // model as the parent.
 func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *BashSession) ToolResult {
 	var content string
+	var usage Usage
 	var err error
 
 	switch call.Function.Name {
@@ -131,15 +137,36 @@ func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *Ba
 	case "view":
 		content, err = runView(workDir, call.input())
 	case "dispatch_subagent":
-		content, err = runDispatchSubagent(ctx, workDir, model, call.input())
+		content, usage, err = runDispatchSubagent(ctx, workDir, model, call.input())
 	default:
 		err = fmt.Errorf("unknown tool %q", call.Function.Name)
 	}
 
 	if err != nil {
-		return ToolResult{ID: call.ID, Content: err.Error(), IsError: true}
+		return ToolResult{ID: call.ID, Content: err.Error(), IsError: true, Usage: usage}
 	}
-	return ToolResult{ID: call.ID, Content: content}
+	return ToolResult{ID: call.ID, Content: truncateOutput(content), Usage: usage}
+}
+
+// maxToolOutputChars caps how much text a single tool result can carry
+// back to the model. Without this, one careless view of a large file, a
+// `cat` of a big log, or an unfiltered glob could dump enough text into
+// the conversation to seriously strain (or outright exceed) the API's
+// request-size limits — and it isn't a one-time cost, since the full
+// history including that result gets resent on every subsequent request
+// until /compact or /new.
+const maxToolOutputChars = 40_000
+
+// truncateOutput cuts s to at most maxToolOutputChars runes, appending a
+// marker noting how much was cut. Rune-based, not byte-based, so a
+// multi-byte UTF-8 character is never split mid-sequence — see
+// tui.truncateRunes for the same reasoning applied on the display side.
+func truncateOutput(s string) string {
+	runes := []rune(s)
+	if len(runes) <= maxToolOutputChars {
+		return s
+	}
+	return string(runes[:maxToolOutputChars]) + fmt.Sprintf("\n… truncated (%d more characters)", len(runes)-maxToolOutputChars)
 }
 
 // resolveInWorkDir resolves a model-supplied path against workDir and
@@ -168,12 +195,33 @@ func resolveInWorkDir(workDir, p string) (string, error) {
 	case err == nil:
 		full = resolved
 	case os.IsNotExist(err):
-		// Path doesn't exist yet (create). Check its parent instead.
-		parent, perr := filepath.EvalSymlinks(filepath.Dir(full))
-		if perr != nil {
-			return "", fmt.Errorf("parent directory does not exist: %s", filepath.Dir(full))
+		// Path doesn't exist yet (create) — possibly several directory
+		// levels deep, none of which exist yet either (a.go under a/b/
+		// where b/ doesn't exist). Walk up to the nearest ancestor that
+		// *does* exist and check that one stays inside root, rather than
+		// requiring the immediate parent to already exist — creating
+		// the missing intermediate directories themselves is the
+		// caller's job (see createFile in editor.go), not this
+		// function's; it only validates where the path would land.
+		ancestor := filepath.Dir(full)
+		for {
+			resolvedAncestor, aerr := filepath.EvalSymlinks(ancestor)
+			if aerr == nil {
+				full = filepath.Join(resolvedAncestor, strings.TrimPrefix(full, ancestor))
+				break
+			}
+			if !os.IsNotExist(aerr) {
+				return "", aerr
+			}
+			parent := filepath.Dir(ancestor)
+			if parent == ancestor {
+				// Reached the filesystem root without finding anything
+				// that exists — not reachable in practice (root always
+				// exists), but avoids an infinite loop if it somehow were.
+				return "", fmt.Errorf("no existing ancestor directory found for %s", full)
+			}
+			ancestor = parent
 		}
-		full = filepath.Join(parent, filepath.Base(full))
 	default:
 		return "", err
 	}

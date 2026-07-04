@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -20,7 +21,7 @@ func TestIntegrationCompact(t *testing.T) {
 		{Role: "assistant", Content: "Got it — Alex, project Zephyr."},
 	}
 
-	cmd := compact(client, history)
+	cmd := compact(context.Background(), client, history)
 	msg := cmd()
 
 	result, ok := msg.(compactResultMsg)

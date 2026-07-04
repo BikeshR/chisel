@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -236,6 +238,63 @@ func TestBashSessionTimeout(t *testing.T) {
 	}
 	if strings.TrimSpace(out) != "recovered" {
 		t.Errorf("output after recovery = %q", out)
+	}
+}
+
+// TestBashSessionTimeoutIncludesPartialOutput is the regression test
+// for a real diagnostic-loss bug: a command that produced useful output
+// before hanging used to have that output discarded entirely on
+// timeout, leaving the model with nothing but "timed out" to go on.
+func TestBashSessionTimeoutIncludesPartialOutput(t *testing.T) {
+	old := bashCommandTimeout
+	bashCommandTimeout = 300 * time.Millisecond
+	defer func() { bashCommandTimeout = old }()
+
+	s := NewBashSession(t.TempDir())
+	defer s.Close()
+
+	_, err := s.Run(context.Background(), "echo before-hang; sleep 5", false)
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "before-hang") {
+		t.Errorf("error = %v, want it to include the output produced before hanging", err)
+	}
+}
+
+// TestBashSessionTimeoutKillsOrphanedChildren is the regression test for
+// the process-group fix: before it, a timeout killed only the `sh`
+// process itself, so anything it had backgrounded (a `npm run dev`, a
+// forked build daemon) kept running invisibly after the session was
+// torn down.
+func TestBashSessionTimeoutKillsOrphanedChildren(t *testing.T) {
+	old := bashCommandTimeout
+	bashCommandTimeout = 300 * time.Millisecond
+	defer func() { bashCommandTimeout = old }()
+
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+
+	s := NewBashSession(dir)
+	defer s.Close()
+
+	cmd := fmt.Sprintf("(sh -c 'echo $$ > %s; sleep 5') & disown; sleep 5", pidFile)
+	if _, err := s.Run(context.Background(), cmd, false); err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+
+	pidBytes, readErr := os.ReadFile(pidFile)
+	if readErr != nil {
+		t.Fatalf("child never wrote its pid: %v", readErr)
+	}
+	pid := strings.TrimSpace(string(pidBytes))
+
+	// Signal 0 sends nothing — it's purely an existence/permission
+	// check, so this doesn't disturb a legitimately-still-running
+	// process (there shouldn't be one, but avoid assuming that).
+	if err := exec.Command("kill", "-0", pid).Run(); err == nil {
+		_ = exec.Command("kill", "-9", pid).Run()
+		t.Errorf("child process %s was still running after the session was torn down — the process-group kill did not reach it", pid)
 	}
 }
 

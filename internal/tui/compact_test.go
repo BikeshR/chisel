@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -120,5 +123,58 @@ func TestHandleCompactResultError(t *testing.T) {
 	lines := gotModel.renderedLines()
 	if len(lines) != 1 || !strings.Contains(lines[0], "stream failed") {
 		t.Errorf("lines = %+v, want an error line mentioning the failure", lines)
+	}
+}
+
+// TestCompactRefusesAToolCallResponse is the regression test for a real
+// data-loss bug: /compact used to trust whatever the model returned as
+// the summary, so a tool-happy model responding with a tool call
+// instead of plain text (a real failure mode — the compact prompt
+// explicitly asks about "files created or modified") would replace the
+// whole conversation with an empty summary. compact() now sends the
+// request via client.WithoutTools() and separately checks the response
+// content isn't empty/tool-call-shaped.
+func TestCompactRefusesAToolCallResponse(t *testing.T) {
+	toolCallSSE := "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"glob\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte(toolCallSSE))
+	}))
+	defer server.Close()
+
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	client := agent.New("minimax-m3")
+	cmd := compact(context.Background(), client, []agent.Message{{Role: "user", Content: "hi"}})
+	msg := cmd().(compactResultMsg)
+
+	if msg.err == nil {
+		t.Fatal("expected an error when the model responds with a tool call instead of a summary")
+	}
+	if msg.summary != "" {
+		t.Errorf("summary = %q, want empty on this failure path", msg.summary)
+	}
+}
+
+func TestCompactRefusesEmptyContentResponse(t *testing.T) {
+	emptySSE := "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\ndata: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte(emptySSE))
+	}))
+	defer server.Close()
+
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	client := agent.New("minimax-m3")
+	cmd := compact(context.Background(), client, []agent.Message{{Role: "user", Content: "hi"}})
+	msg := cmd().(compactResultMsg)
+
+	if msg.err == nil {
+		t.Fatal("expected an error when the model responds with empty content")
 	}
 }

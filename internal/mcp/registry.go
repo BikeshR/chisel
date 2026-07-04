@@ -36,6 +36,16 @@ func LoadAndStartAll() (*Registry, []error) {
 	r := &Registry{servers: make(map[string]*Server, len(cfg.MCPServers))}
 	var errs []error
 	for name, serverCfg := range cfg.MCPServers {
+		// SplitToolName finds the server/tool boundary by cutting at the
+		// *first* "__" in mcp__<server>__<tool> — a server name that
+		// itself contains "__" (e.g. "my__server") would make that cut
+		// land in the wrong place and misroute every call to it, so
+		// reject the name here rather than starting a server whose tools
+		// can never be dispatched correctly.
+		if strings.Contains(name, "__") {
+			errs = append(errs, fmt.Errorf("mcp server %q: name must not contain \"__\" — it's used as the delimiter between server and tool name in mcp__<server>__<tool>", name))
+			continue
+		}
 		s, err := Start(name, serverCfg)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("mcp server %q: %w", name, err))

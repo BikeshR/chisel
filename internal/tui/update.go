@@ -260,7 +260,6 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 
 	if ev.Err != nil {
 		m.endTurn()
-		m.err = ev.Err
 		m.endStreamLine()
 		m.appendLine(errorStyle.Render("error  " + interruptibleErrorText(ev.Err)))
 		m.state = stateInput
@@ -273,21 +272,26 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		return m, notifyIdle("chisel hit an error")
 	}
 
-	return m.handleStreamComplete(*ev.Message, ev.Usage)
+	return m.handleStreamComplete(*ev.Message, ev.Usage, ev.FinishReason)
 }
 
-func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage) (tea.Model, tea.Cmd) {
+// handleStreamComplete's finishReason param is display-only — shown as
+// a "response truncated" notice when it's "length", nothing more.
+// Whether to dispatch tool calls is still decided purely from
+// resp.ToolCalls (see the comment below): trusting finish_reason for
+// that specifically was the bug this same function was fixed for
+// earlier — a provider can (and does, in practice) report finish_reason:
+// "stop" while still returning a non-empty tool_calls array.
+func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage, finishReason string) (tea.Model, tea.Cmd) {
 	m.endStreamLine()
 
 	m.messages = append(m.messages, resp)
 	m.tokensIn += usage.InputTokens
 	m.tokensOut += usage.OutputTokens
 	m.lastContextTokens = usage.InputTokens
-	// Go by whether the message actually has tool calls, not the
-	// provider's finish_reason field — a provider can (and does, in
-	// practice) report finish_reason: "stop" while still returning a
-	// non-empty tool_calls array, and trusting finish_reason there would
-	// silently skip dispatching them.
+	if finishReason == "length" {
+		m.appendLine(dimStyle.Render("(response truncated — hit the model's length limit)"))
+	}
 	m.pendingUses = resp.ToolCalls
 
 	if len(m.pendingUses) == 0 {
@@ -361,6 +365,13 @@ func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
 	if len(m.pendingUses) == 0 {
 		return m, nil
 	}
+
+	// Non-zero only for tools that make their own model requests under
+	// the hood (dispatch_subagent) — without this, a subagent's real
+	// cost, often the priciest single call in a turn since it's
+	// multi-turn on its own, never showed up in the status bar's totals.
+	m.tokensIn += result.Usage.InputTokens
+	m.tokensOut += result.Usage.OutputTokens
 
 	if result.IsError {
 		m.appendLine(errorStyle.Render("  ✗ " + firstLine(interruptibleResultText(result.Content))))

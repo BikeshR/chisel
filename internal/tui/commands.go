@@ -144,7 +144,7 @@ func (m Model) handleModelCommand(args []string) (Model, tea.Cmd) {
 		}
 		m.appendLine(dimStyle.Render("checking " + target + "…"))
 		m.state = stateWaitingModel
-		return m, checkModel(m.newTurnContext(), target)
+		return m, checkModel(m.newTurnContext(), m.client, target)
 	}
 
 	name := args[0]
@@ -154,14 +154,17 @@ func (m Model) handleModelCommand(args []string) (Model, tea.Cmd) {
 }
 
 // checkModel sends a minimal request to name through chisel's real request
-// shape — same system prompt and tool declarations a normal turn would use
-// — so it catches the same class of failure found earlier in this
-// project's development (a model or provider rejecting the tool set
-// outright), not just plain reachability.
-func checkModel(ctx context.Context, name string) tea.Cmd {
+// shape — same system prompt, tool declarations (including any MCP
+// tools), and memory content the live client is actually using, via
+// client.Clone — so it catches the same class of failure found earlier
+// in this project's development (a model or provider rejecting the
+// tool set outright), not just plain reachability. Cloning matters once
+// MCP servers are configured: a bare client with none of that has a
+// different (smaller) request shape than what a real turn sends.
+func checkModel(ctx context.Context, client *agent.Client, name string) tea.Cmd {
 	return func() tea.Msg {
-		client := agent.New(name)
-		ch, err := client.SendStreaming(ctx, []agent.Message{
+		probe := client.Clone(name)
+		ch, err := probe.SendStreaming(ctx, []agent.Message{
 			{Role: "user", Content: "Reply with exactly the word: ok"},
 		})
 		if err != nil {

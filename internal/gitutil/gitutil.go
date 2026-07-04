@@ -20,9 +20,16 @@ func IsRepo(dir string) bool {
 
 // DirtyPaths returns the set of paths git considers changed in dir —
 // staged or not, tracked or not — as they appear in `git status
-// --porcelain` (relative to dir).
+// --porcelain -z` (relative to dir). The -z form is what makes this
+// correct for any filename: without it, git C-quotes "unusual"
+// characters (non-ASCII, spaces, quotes themselves) in a shell-escaped
+// form that a plain strings.Trim(path, `"`) only half-undoes — a
+// filename with, say, a literal backslash or an actual embedded quote
+// would come out wrong, and the later `git add --` on that mangled
+// string would then fail. -z instead prints paths as raw, unquoted
+// bytes, NUL-separated.
 func DirtyPaths(dir string) (map[string]bool, error) {
-	cmd := exec.Command("git", "status", "--porcelain")
+	cmd := exec.Command("git", "status", "--porcelain", "-z")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -30,18 +37,23 @@ func DirtyPaths(dir string) (map[string]bool, error) {
 	}
 
 	paths := map[string]bool{}
-	for _, line := range strings.Split(string(out), "\n") {
-		if len(line) < 4 {
+	entries := strings.Split(strings.TrimRight(string(out), "\x00"), "\x00")
+	for i := 0; i < len(entries); i++ {
+		entry := entries[i]
+		if len(entry) < 4 {
 			continue
 		}
-		// Porcelain format is "XY path" (or "XY orig -> new" for a
-		// rename) — the status codes are exactly 2 characters, then a
-		// space, then the path.
-		path := line[3:]
-		if _, new, ok := strings.Cut(path, " -> "); ok {
-			path = new
+		// Porcelain -z format is "XY path" per entry, NUL-terminated —
+		// the status codes are exactly 2 characters, then a space, then
+		// the raw path. A rename or copy (R or C in either status
+		// position) adds one more NUL-separated field right after this
+		// one carrying the *original* path — skip over it rather than
+		// misreading it as its own entry.
+		status, path := entry[:2], entry[3:]
+		if strings.ContainsAny(status, "RC") {
+			i++
 		}
-		paths[strings.Trim(path, `"`)] = true
+		paths[path] = true
 	}
 	return paths, nil
 }

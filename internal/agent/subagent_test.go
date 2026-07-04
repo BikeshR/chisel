@@ -27,6 +27,21 @@ func TestRunViewFile(t *testing.T) {
 	}
 }
 
+func TestRunViewRejectsBinaryFile(t *testing.T) {
+	dir := t.TempDir()
+	// A NUL byte early in the content is what the isBinary/looksBinary
+	// heuristic keys on — matching grep's own existing binary-file skip.
+	data := append([]byte("PNG"), 0x00, 0x01, 0x02, 0x03)
+	if err := os.WriteFile(filepath.Join(dir, "image.png"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := runView(dir, json.RawMessage(`{"path":"image.png"}`))
+	if err == nil {
+		t.Error("expected an error viewing a binary file, got nil")
+	}
+}
+
 func TestRunViewDirectory(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644); err != nil {
@@ -75,7 +90,12 @@ func sseChunk(content, finishReason, toolCallsJSON string) string {
 	if toolCallsJSON != "" {
 		extra = `,"tool_calls":` + toolCallsJSON
 	}
-	return `data: {"choices":[{"index":0,"finish_reason":"` + finishReason + `","delta":{"role":"assistant","content":"` + content + `"` + extra + `}}]}` + "\n\ndata: [DONE]\n"
+	// The trailing usage-only chunk (empty choices) matches the real
+	// server's shape — see client.go's decodeStream, which reads usage
+	// from exactly this kind of chunk.
+	return `data: {"choices":[{"index":0,"finish_reason":"` + finishReason + `","delta":{"role":"assistant","content":"` + content + `"` + extra + `}}]}` + "\n\n" +
+		`data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20}}` + "\n\n" +
+		"data: [DONE]\n"
 }
 
 func TestRunSubagentTextOnly(t *testing.T) {
@@ -86,12 +106,15 @@ func TestRunSubagentTextOnly(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	got, err := RunSubagent(context.Background(), t.TempDir(), "minimax-m3", "what is the answer?")
+	got, usage, err := RunSubagent(context.Background(), t.TempDir(), "minimax-m3", "what is the answer?")
 	if err != nil {
 		t.Fatalf("RunSubagent: %v", err)
 	}
 	if got != "the answer is 42" {
 		t.Errorf("got %q", got)
+	}
+	if usage.InputTokens == 0 && usage.OutputTokens == 0 {
+		t.Error("expected non-zero usage from the single turn")
 	}
 }
 
@@ -110,7 +133,7 @@ func TestRunSubagentWithToolCall(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	got, err := RunSubagent(context.Background(), dir, "minimax-m3", "find the secret in notes.txt")
+	got, usage, err := RunSubagent(context.Background(), dir, "minimax-m3", "find the secret in notes.txt")
 	if err != nil {
 		t.Fatalf("RunSubagent: %v", err)
 	}
@@ -119,6 +142,14 @@ func TestRunSubagentWithToolCall(t *testing.T) {
 	}
 	if *callCount != 2 {
 		t.Errorf("expected 2 requests (one tool round trip), got %d", *callCount)
+	}
+	// TestRunSubagentUsageAccumulatesAcrossTurns is folded into this
+	// test rather than a separate one — it needs the exact same
+	// two-turn tool-call fixture. Each of the 2 model requests
+	// contributes 100/20 tokens (see sseChunk) — accumulated, not just
+	// the last turn's, is the whole point of what this was fixed for.
+	if usage.InputTokens != 200 || usage.OutputTokens != 40 {
+		t.Errorf("usage = %+v, want 200/40 accumulated across both turns", usage)
 	}
 }
 
@@ -133,7 +164,7 @@ func TestRunSubagentExceedsMaxTurns(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	_, err := RunSubagent(context.Background(), t.TempDir(), "minimax-m3", "loop forever")
+	_, _, err := RunSubagent(context.Background(), t.TempDir(), "minimax-m3", "loop forever")
 	if err == nil {
 		t.Fatal("expected an error when the subagent never finishes")
 	}

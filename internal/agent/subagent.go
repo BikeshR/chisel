@@ -61,15 +61,15 @@ func runView(workDir string, rawInput json.RawMessage) (string, error) {
 	return viewPath(path, in.ViewRange)
 }
 
-func runDispatchSubagent(ctx context.Context, workDir, model string, rawInput json.RawMessage) (string, error) {
+func runDispatchSubagent(ctx context.Context, workDir, model string, rawInput json.RawMessage) (string, Usage, error) {
 	var in struct {
 		Task string `json:"task"`
 	}
 	if err := json.Unmarshal(rawInput, &in); err != nil {
-		return "", err
+		return "", Usage{}, err
 	}
 	if in.Task == "" {
-		return "", fmt.Errorf("task is required")
+		return "", Usage{}, fmt.Errorf("task is required")
 	}
 	return RunSubagent(ctx, workDir, model, in.Task)
 }
@@ -77,23 +77,30 @@ func runDispatchSubagent(ctx context.Context, workDir, model string, rawInput js
 // RunSubagent runs a self-contained conversation using model, seeded with
 // task as the sole starting message and restricted to subagentTools() —
 // executed directly with no permission gate, since nothing in that tool
-// set can mutate anything. Returns the subagent's final answer.
-func RunSubagent(ctx context.Context, workDir, model, task string) (string, error) {
+// set can mutate anything. Returns the subagent's final answer and its
+// accumulated token usage across every turn it took — without plumbing
+// this back, a subagent's real cost (often the most expensive kind of
+// call here, being multi-turn on its own) was invisible to the parent's
+// token accounting, undercounting exactly when spend was highest.
+func RunSubagent(ctx context.Context, workDir, model, task string) (string, Usage, error) {
 	client := New(model)
 	client.tools = subagentTools()
 
 	history := []Message{{Role: "user", Content: subagentTaskPrompt(task)}}
+	var total Usage
 
 	for turn := 1; turn <= maxSubagentTurns; turn++ {
 		ch, err := client.SendStreaming(ctx, history)
 		if err != nil {
-			return "", fmt.Errorf("subagent turn %d: %w", turn, err)
+			return "", total, fmt.Errorf("subagent turn %d: %w", turn, err)
 		}
 
-		msg, _, err := Drain(ch)
+		msg, usage, err := Drain(ch)
 		if err != nil {
-			return "", fmt.Errorf("subagent turn %d: %w", turn, err)
+			return "", total, fmt.Errorf("subagent turn %d: %w", turn, err)
 		}
+		total.InputTokens += usage.InputTokens
+		total.OutputTokens += usage.OutputTokens
 
 		history = append(history, *msg)
 
@@ -101,7 +108,7 @@ func RunSubagent(ctx context.Context, workDir, model, task string) (string, erro
 		// finish_reason — see the same fix and reasoning in
 		// internal/tui/update.go's handleStreamComplete.
 		if len(msg.ToolCalls) == 0 {
-			return msg.Content, nil
+			return msg.Content, total, nil
 		}
 
 		for _, call := range msg.ToolCalls {
@@ -110,7 +117,7 @@ func RunSubagent(ctx context.Context, workDir, model, task string) (string, erro
 		}
 	}
 
-	return "", fmt.Errorf("subagent did not finish within %d turns", maxSubagentTurns)
+	return "", total, fmt.Errorf("subagent did not finish within %d turns", maxSubagentTurns)
 }
 
 func subagentTaskPrompt(task string) string {

@@ -4,6 +4,8 @@
 package session
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -31,14 +33,19 @@ func Path(workDir string) (string, error) {
 
 // sanitize turns an absolute path into a single filesystem-safe component,
 // readable enough to eyeball in `ls ~/.chisel/sessions` — e.g.
-// /home/brana/code/chisel becomes home-brana-code-chisel.
+// /home/brana/code/chisel becomes home-brana-code-chisel-3f2a91c0. The
+// trailing hash (of the untouched workDir, not the readable part) is
+// what actually makes the name unique — without it, distinct directories
+// like /home/x/a-b and /home/x/a/b both collapse to home-x-a-b and
+// would silently share (and overwrite) one session file.
 func sanitize(workDir string) string {
 	s := strings.TrimPrefix(filepath.ToSlash(workDir), "/")
 	s = strings.ReplaceAll(s, "/", "-")
 	if s == "" {
 		s = "root"
 	}
-	return s
+	sum := sha256.Sum256([]byte(workDir))
+	return s + "-" + hex.EncodeToString(sum[:4])
 }
 
 // Load returns the saved messages for workDir and when they were saved.
