@@ -82,6 +82,20 @@ type Model struct {
 	// permission.go's allowlistKey for what's eligible and why. In
 	// memory only; nothing here is meant to persist across restarts.
 	sessionAllowlist map[string]bool
+	// lastToolCallKey/toolCallRepeatCount track consecutive identical
+	// tool calls (see permission.go's toolCallKey/doomLoopThreshold) —
+	// reset whenever a call differs from the previous one, regardless
+	// of turn boundaries, since a model stuck repeating the same call
+	// can do so across several turns just as easily as within one.
+	lastToolCallKey     string
+	toolCallRepeatCount int
+	// awaitingLoopConfirmation is set when the current permission prompt
+	// (stateAwaitingPermission) was forced by the doom-loop guard rather
+	// than a normal ask — checked by the "a" key handler so a habitual
+	// "always allow" doesn't silently permit every future repeat of a
+	// call that's actively suspected of looping, even for a call that
+	// would otherwise be allowlist-eligible.
+	awaitingLoopConfirmation bool
 	// awaitingDenialReason is set when "n" denies a tool call — instead
 	// of immediately resending a canned denial message, the next thing
 	// the user types (or nothing, if they just hit enter) becomes the

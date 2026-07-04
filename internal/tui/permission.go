@@ -50,6 +50,27 @@ func decidePermission(call agent.ToolCall, planMode bool, allowlist map[string]b
 	return permissionAllow, ""
 }
 
+// doomLoopThreshold is how many identical calls in a row (see
+// toolCallKey) force a confirmation regardless of what decidePermission
+// would otherwise say — including a call that's auto-allowed by
+// default or already on the "always allow" list. A model that's stuck
+// re-issuing the exact same call over and over is a real, observed
+// tool-calling failure mode (OpenCode calls this "doom loop" detection)
+// rather than a hypothetical one, and it's cheap insurance for chisel
+// specifically: OpenCode Go's hard per-window dollar caps (see
+// docs/design.md §4) mean a runaway loop doesn't just waste time, it
+// can burn through a session's budget outright.
+const doomLoopThreshold = 3
+
+// toolCallKey identifies a call by name and exact arguments, for
+// detecting repetition — see doomLoopThreshold. Deliberately coarser
+// than allowlistKey (which only covers bash/MCP): any tool repeated
+// identically is worth noticing, not just the ones eligible for
+// always-allow.
+func toolCallKey(call agent.ToolCall) string {
+	return call.Function.Name + "\x00" + call.Function.Arguments
+}
+
 // needsPermission reports whether call must be confirmed before running.
 // Every MCP-sourced tool always needs permission — chisel has no way to
 // know what an arbitrary server's tool actually does, so it can't apply

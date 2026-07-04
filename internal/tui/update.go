@@ -116,7 +116,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, m.skills, call)
 		case "a", "A":
 			call := m.pendingUses[0]
-			if key, ok := allowlistKey(call); ok {
+			// A doom-loop-forced prompt never offers "a" (see
+			// dispatchNextTool), but the key itself isn't otherwise
+			// disabled — without this check, a habitual "a" here would
+			// silently permit every future repeat of a call actively
+			// suspected of looping, exactly what the guard exists to
+			// prevent. Falls through to a plain approval instead.
+			if key, ok := allowlistKey(call); ok && !m.awaitingLoopConfirmation {
 				if m.sessionAllowlist == nil {
 					m.sessionAllowlist = make(map[string]bool)
 				}
@@ -433,16 +439,36 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	}
 	call := m.pendingUses[0]
 
-	switch decision, reason := decidePermission(call, m.client.PlanMode(), m.sessionAllowlist); decision {
+	key := toolCallKey(call)
+	if key == m.lastToolCallKey {
+		m.toolCallRepeatCount++
+	} else {
+		m.lastToolCallKey = key
+		m.toolCallRepeatCount = 1
+	}
+	looping := m.toolCallRepeatCount >= doomLoopThreshold
+
+	decision, reason := decidePermission(call, m.client.PlanMode(), m.sessionAllowlist)
+	// A call that would otherwise run without asking (auto-allowed by
+	// default, or already on the "always allow" list) still gets
+	// escalated to a confirmation once it's repeated identically this
+	// many times in a row — see doomLoopThreshold. An already-denied
+	// call (plan mode) has nothing to escalate; it's blocked either way.
+	if decision == permissionAllow && looping {
+		decision = permissionAsk
+	}
+
+	switch decision {
 	case permissionDeny:
 		return m.handleToolResult(agent.ToolResult{ID: call.ID, Content: reason, IsError: true})
 
 	case permissionAsk:
 		m.endTurn() // nothing async is in flight while waiting on a y/n decision
 		m.state = stateAwaitingPermission
+		m.awaitingLoopConfirmation = looping
 
 		options := "[y/n]"
-		if _, allowlistable := allowlistKey(call); allowlistable {
+		if _, allowlistable := allowlistKey(call); allowlistable && !looping {
 			options = "[y/n/a]"
 		}
 
@@ -455,6 +481,10 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 			if cwd := m.bash.Cwd(); cwd != "" && cwd != m.workDir {
 				prompt = fmt.Sprintf("allow %s?  (in %s)  %s", summarizeCall(call), cwd, options)
 			}
+		}
+		if looping {
+			prompt = fmt.Sprintf("%s has been called %d times in a row with identical arguments — this may be stuck in a loop.\n\n%s",
+				call.Function.Name, m.toolCallRepeatCount, prompt)
 		}
 		m.appendLine(permissionStyle.Render(prompt))
 		return m, notifyIdle("chisel needs your permission")
