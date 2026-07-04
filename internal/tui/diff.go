@@ -8,8 +8,8 @@ import (
 )
 
 var (
-	diffAddStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("108")) // muted green
-	diffDelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("174")) // muted red
+	diffAddStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "108"})  // muted green
+	diffDelStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "174"}) // muted red
 )
 
 // maxDiffPreviewLines caps how much of a diff a permission prompt shows

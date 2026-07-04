@@ -3,6 +3,9 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/BikeshR/chisel/internal/mcp"
 )
@@ -16,7 +19,7 @@ func (m Model) View() string {
 	b.WriteString(m.viewport.View())
 	b.WriteString("\n")
 
-	if todos := renderTodos(m.todos); todos != "" {
+	if todos := wrapToWidth(renderTodos(m.todos), m.width); todos != "" {
 		b.WriteString(todos)
 		b.WriteString("\n")
 	}
@@ -24,22 +27,48 @@ func (m Model) View() string {
 	switch m.state {
 	case stateAwaitingPermission:
 		// The prompt itself was already appended to the transcript above;
-		// nothing extra goes on the input line while we wait for y/n.
-		b.WriteString(dimStyle.Render("(y/n)"))
-	case stateWaitingModel:
-		b.WriteString(m.spinner.View() + " thinking…")
-	case stateExecutingTool:
-		b.WriteString(m.spinner.View() + " running…")
+		// nothing extra goes on the input line while we wait for a decision.
+		b.WriteString(dimStyle.Render(m.permissionHint))
+	case stateWaitingModel, stateExecutingTool:
+		// The textarea stays visible (at a reduced height, so the total
+		// footprint still matches recomputeViewportHeight's fixed
+		// reservation) rather than being replaced outright — otherwise
+		// anything typed here (to be queued once chisel is free again) was
+		// completely invisible while composing it.
+		b.WriteString(m.busyLine())
+		b.WriteString("\n")
+		ta := m.textArea
+		ta.SetHeight(inputHeight - 1)
+		b.WriteString(ta.View())
 	default:
 		b.WriteString(m.textArea.View())
 	}
 	b.WriteString("\n")
 
-	b.WriteString(statusBarStyle.Width(m.width).Render(m.statusLine()))
+	b.WriteString(statusBarStyle.Width(m.width).Render(m.statusLine(m.width)))
 	return b.String()
 }
 
-func (m Model) statusLine() string {
+// statusLine renders the status bar text, dropping optional segments —
+// least important first — until it fits width. Without this,
+// statusBarStyle.Width's default wrap-when-too-long behavior would break
+// the fixed 3-line input/status layout on a narrow terminal (see
+// recomputeViewportHeight, which never accounts for a wrapped status bar).
+// busyLine renders the spinner line shown during stateWaitingModel/
+// stateExecutingTool: what's running (the tool name during a tool call,
+// nothing more specific during a model request), how long it's been
+// running, and the esc-to-interrupt hint — previously a static "thinking…"
+// /"running…" with none of that.
+func (m Model) busyLine() string {
+	label := "thinking"
+	if m.state == stateExecutingTool && len(m.pendingUses) > 0 {
+		label = summarizeCall(m.pendingUses[0])
+	}
+	elapsed := time.Since(m.turnStartedAt).Round(time.Second)
+	return fmt.Sprintf("%s %s… (%s · esc to interrupt)", m.spinner.View(), label, elapsed)
+}
+
+func (m Model) statusLine(width int) string {
 	context := formatTokenCount(m.lastContextTokens) + " tok"
 	if m.lastContextTokens >= contextWarnThreshold {
 		context = errorStyle.Render(context + " — large, consider /compact")
@@ -65,8 +94,29 @@ func (m Model) statusLine() string {
 		background = dimStyle.Render(fmt.Sprintf("%d bg running", n)) + " · "
 	}
 
-	return fmt.Sprintf(" %s%s%s%s%s · context %s · spent %s in / %s out · ctrl+c to quit",
-		plan, mcpWarning, queued, background, m.client.ModelName(), context, formatTokenCount(m.tokensIn), formatTokenCount(m.tokensOut))
+	tail := fmt.Sprintf("%s · context %s · spent %s in / %s out · ctrl+c to quit",
+		m.client.ModelName(), context, formatTokenCount(m.tokensIn), formatTokenCount(m.tokensOut))
+
+	// Drop segments least important to see at a glance first: background,
+	// then queued, then the mcp warning (still visible via /status even
+	// when dropped here). Plan mode and the core stats are never dropped.
+	optional := []string{background, queued, mcpWarning}
+	for drop := 0; drop <= len(optional); drop++ {
+		line := " " + plan
+		for i, seg := range optional {
+			if i >= drop {
+				line += seg
+			}
+		}
+		line += tail
+		if lipgloss.Width(line) <= width || drop == len(optional) {
+			if lipgloss.Width(line) > width {
+				return lipgloss.NewStyle().MaxWidth(width).Render(line)
+			}
+			return line
+		}
+	}
+	return tail
 }
 
 // runningBackgroundCount counts how many background tasks are still

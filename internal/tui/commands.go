@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,6 +15,55 @@ import (
 	"github.com/BikeshR/chisel/internal/session"
 	"github.com/BikeshR/chisel/internal/skill"
 )
+
+// builtinCommandNames mirrors handleCommand's own switch — kept in sync
+// with it the same way helpText already has to be — for tab completion
+// (see commandNames/completeCommandInInput).
+var builtinCommandNames = []string{
+	"/help", "/model", "/think", "/new", "/compact", "/retry",
+	"/git", "/plan", "/status", "/usage", "/rewind", "/queue",
+}
+
+// commandNames returns every "/"-command name available for tab
+// completion: the fixed built-ins above plus any user-defined custom
+// commands loaded at startup (~/.chisel/commands, <workDir>/.chisel/commands).
+func (m Model) commandNames() []string {
+	names := append([]string{}, builtinCommandNames...)
+	for _, name := range customcmd.Names(m.customCommands) {
+		names = append(names, "/"+name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// completeCommandInInput tab-completes a "/"-command name being typed —
+// same longest-common-prefix behavior as @-file completion (fileref.go):
+// a single match completes fully, plus a trailing space so the cursor
+// lands ready for arguments; several matches complete only as far as
+// they all agree and get listed in the transcript so an ambiguous
+// completion isn't a silent no-op.
+func (m *Model) completeCommandInInput() {
+	value := strings.TrimRight(m.textArea.Value(), "\n")
+	var matches []string
+	for _, name := range m.commandNames() {
+		if strings.HasPrefix(name, value) {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) == 0 {
+		return
+	}
+	if len(matches) == 1 {
+		m.textArea.SetValue(matches[0] + " ")
+		m.textArea.CursorEnd()
+		return
+	}
+	if completed := longestCommonPrefix(matches); completed != value {
+		m.textArea.SetValue(completed)
+		m.textArea.CursorEnd()
+	}
+	m.appendLine(dimStyle.Render("  " + strings.Join(capCandidates(matches, maxCompletionCandidatesShown), "  ")))
+}
 
 // handleCommand processes a "/"-prefixed line from the input box instead of
 // sending it to the model. Most commands are synchronous (nil Cmd); /model
@@ -42,6 +92,8 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 		return m.handleUsageCommand(), nil
 	case "/rewind":
 		return m.handleRewindCommand(fields[1:]), nil
+	case "/queue":
+		return m.handleQueueCommand(fields[1:]), nil
 	case "/help":
 		return m.handleHelpCommand(), nil
 	default:
@@ -86,12 +138,17 @@ const helpText = `commands:
   /status               show workdir, session, hooks, MCP, and memory info
   /usage                show session token/request counts
   /rewind [n]           list checkpoints, or restore code+conversation to checkpoint n
+  /queue [clear]        list messages queued while busy, or drop them all
 
 keys:
   enter                 submit · in a permission prompt, only y/Y approves · while busy, queues instead
   alt+enter             insert a newline while composing a message
   @path                 reference a file — its content is sent to the model, tab to complete
+  /command              tab-completes too — ambiguous prefixes list candidates
   !command              run a shell command directly, bypassing the model entirely — no permission prompt
+  up / down             recall previous input (single-line only)
+  ctrl+o                expand/collapse the most recent tool result
+  ctrl+x                compose the current message in $EDITOR (falls back to vi)
   esc                   interrupt a running request/tool · deny a permission prompt
   y / n / a             approve / deny / always-allow-this-session in a permission prompt
   pgup/pgdn, ctrl+u/d   scroll the transcript
@@ -117,7 +174,7 @@ func (m Model) handleRetryCommand() (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.appendLine(dimStyle.Render("retrying…"))
-	m.state = stateWaitingModel
+	m.startBusy(stateWaitingModel)
 	ctx := m.newTurnContext()
 	return m, startStream(ctx, m.client, m.messages)
 }
@@ -238,19 +295,58 @@ func (m Model) handlePlanCommand() Model {
 // handleNewCommand abandons the current transcript, in memory and on
 // disk, and starts fresh. Doesn't touch which model is selected or the
 // bash session's cd/env state — those aren't part of "the conversation".
-// The clear error (if any) is appended *after* the reset, not before —
-// appending first and then wiping m.entries would erase it before it was
-// ever actually shown.
+// Also clears todos and checkpoints: both are tied to the conversation
+// just abandoned — a checkpoint's messageIndex in particular refers to a
+// position in the now-gone m.messages, and leaving it behind meant a
+// later /rewind could slice m.messages past its new, shorter length and
+// panic. The clear error (if any) is appended *after* the reset, not
+// before — appending first and then wiping m.entries would erase it
+// before it was ever actually shown.
 func (m Model) handleNewCommand() Model {
 	clearErr := session.Clear(m.workDir)
 	m.messages = nil
 	m.entries = nil
 	m.lastContextTokens = 0
+	m.todos = nil
+	m.checkpoints = nil
+	m.pendingRewind = nil
 	m.viewport.SetContent("")
+	m.recomputeViewportHeight()
 	m.appendLine(dimStyle.Render("started a new session"))
 	if clearErr != nil {
 		m.appendLine(errorStyle.Render("failed to clear saved session: " + clearErr.Error()))
 	}
+	return m
+}
+
+// handleQueueCommand implements /queue [clear] — messages typed while
+// chisel was busy (see the stateWaitingModel/stateExecutingTool case in
+// handleKey) previously only showed up as a bare count in the status
+// bar, with no way to see what they actually said or to change your mind
+// about sending one.
+func (m Model) handleQueueCommand(args []string) Model {
+	if len(args) == 0 {
+		if len(m.queuedMessages) == 0 {
+			m.appendLine(dimStyle.Render("queue is empty"))
+			return m
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d message(s) queued:\n", len(m.queuedMessages))
+		for i, msg := range m.queuedMessages {
+			fmt.Fprintf(&b, "  %d. %s\n", i+1, firstLine(msg))
+		}
+		b.WriteString("type /queue clear to drop them")
+		m.appendLine(dimStyle.Render(b.String()))
+		return m
+	}
+
+	if args[0] != "clear" {
+		m.appendLine(dimStyle.Render("usage: /queue [clear]"))
+		return m
+	}
+	n := len(m.queuedMessages)
+	m.queuedMessages = nil
+	m.appendLine(dimStyle.Render(fmt.Sprintf("cleared %d queued message(s)", n)))
 	return m
 }
 
@@ -311,7 +407,7 @@ func (m Model) handleModelCommand(args []string) (Model, tea.Cmd) {
 			target = args[1]
 		}
 		m.appendLine(dimStyle.Render("checking " + target + "…"))
-		m.state = stateWaitingModel
+		m.startBusy(stateWaitingModel)
 		return m, checkModel(m.newTurnContext(), m.client, target)
 	}
 
@@ -368,7 +464,7 @@ func (m Model) handleCompactCommand() (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.appendLine(dimStyle.Render("compacting…"))
-	m.state = stateWaitingModel
+	m.startBusy(stateWaitingModel)
 	return m, compact(m.newTurnContext(), m.client, m.messages)
 }
 
@@ -387,6 +483,11 @@ func (m Model) handleCompactResult(msg compactResultMsg) (tea.Model, tea.Cmd) {
 	m.messages = compactedHistory(msg.summary)
 	m.entries = nil
 	m.lastContextTokens = 0
+	// Every checkpoint's messageIndex refers to a position in the
+	// conversation just replaced with a single summary message — same
+	// stale-index hazard /new guards against, see its own doc comment.
+	m.checkpoints = nil
+	m.pendingRewind = nil
 	m.viewport.SetContent("")
 	m.appendLine(dimStyle.Render("── conversation compacted ──"))
 	m.appendAssistantEntry(msg.summary)

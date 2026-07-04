@@ -126,11 +126,19 @@ func longestCommonPrefix(strs []string) string {
 // after more text follows it.
 var lastFileRefToken = regexp.MustCompile(`@(\S*)$`)
 
+// maxCompletionCandidatesShown caps how many candidates an ambiguous tab
+// completion lists in the transcript — a prefix matching hundreds of
+// files is still worth completing as far as possible, but dumping all of
+// them isn't a usable list, just noise.
+const maxCompletionCandidatesShown = 20
+
 // completeFileReferenceInInput replaces the last @-prefixed token in
 // the textarea's current value with its tab-completed form, if exactly
 // one or more files match. A no-op if there's no trailing @token, or if
 // completion wouldn't change anything (no matches, or already at the
-// longest common prefix).
+// longest common prefix). When several files match, the common-prefix
+// completion alone gave no feedback about what those matches actually
+// were — this also lists them (capped) in the transcript.
 func (m *Model) completeFileReferenceInInput() {
 	value := m.textArea.Value()
 	loc := lastFileRefToken.FindStringSubmatchIndex(value)
@@ -139,8 +147,23 @@ func (m *Model) completeFileReferenceInInput() {
 	}
 	partial := value[loc[2]:loc[3]]
 	completed, ok := completeFileReference(m.workDir, partial)
-	if !ok || completed == partial {
+	if !ok {
 		return
 	}
-	m.textArea.SetValue(value[:loc[2]] + completed)
+	if completed != partial {
+		m.textArea.SetValue(value[:loc[2]] + completed)
+	}
+	if matches := listFilesForCompletion(m.workDir, partial); len(matches) > 1 {
+		m.appendLine(dimStyle.Render("  " + strings.Join(capCandidates(matches, maxCompletionCandidatesShown), "  ")))
+	}
+}
+
+// capCandidates truncates matches to at most max entries, appending a
+// count of what was hidden rather than silently dropping it.
+func capCandidates(matches []string, max int) []string {
+	if len(matches) <= max {
+		return matches
+	}
+	shown := append([]string{}, matches[:max]...)
+	return append(shown, fmt.Sprintf("… %d more", len(matches)-max))
 }

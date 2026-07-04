@@ -34,8 +34,8 @@ var (
 	// codes rather than the whole string once, which is harmless in a
 	// real terminal but needlessly verbose output for what a flat color
 	// change already conveys clearly enough.
-	todoDoneStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	todoInProgressStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("223")).Bold(true)
+	todoDoneStyle       = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "245", Dark: "241"})
+	todoInProgressStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "136", Dark: "223"}).Bold(true)
 )
 
 // renderTodos renders the current checklist as a small persistent

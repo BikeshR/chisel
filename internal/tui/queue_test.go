@@ -107,10 +107,39 @@ func TestQueuedMessageDeliveredWhenTurnCompletes(t *testing.T) {
 	}
 }
 
+func TestQueueCommandListsQueuedMessages(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3"), queuedMessages: []string{"first", "second"}}
+	m = m.handleQueueCommand(nil)
+
+	lines := m.renderedLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "first") || !strings.Contains(lines[0], "second") {
+		t.Errorf("renderedLines() = %+v, want a line listing both queued messages", lines)
+	}
+}
+
+func TestQueueCommandClearEmptiesTheQueue(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3"), queuedMessages: []string{"first", "second"}}
+	m = m.handleQueueCommand([]string{"clear"})
+
+	if len(m.queuedMessages) != 0 {
+		t.Errorf("queuedMessages = %+v, want empty after /queue clear", m.queuedMessages)
+	}
+}
+
+func TestQueueCommandEmptyReportsEmpty(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3")}
+	m = m.handleQueueCommand(nil)
+
+	lines := m.renderedLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "empty") {
+		t.Errorf("renderedLines() = %+v, want a line reporting the queue is empty", lines)
+	}
+}
+
 func TestStatusLineShowsQueuedCount(t *testing.T) {
 	m := Model{client: agent.New("minimax-m3"), queuedMessages: []string{"a", "b"}}
-	if !strings.Contains(m.statusLine(), "2 queued") {
-		t.Errorf("statusLine() = %q, want it to mention 2 queued messages", m.statusLine())
+	if !strings.Contains(m.statusLine(200), "2 queued") {
+		t.Errorf("statusLine() = %q, want it to mention 2 queued messages", m.statusLine(200))
 	}
 }
 

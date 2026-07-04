@@ -33,9 +33,9 @@ func renderHistory(messages []agent.Message) []entry {
 
 		case "tool":
 			if rest, isErr := strings.CutPrefix(msg.Content, agent.ErrorContentPrefix); isErr {
-				entries = append(entries, entry{styled: errorStyle.Render("  ✗ " + firstLine(rest))})
+				entries = append(entries, entry{isToolResult: true, fullContent: rest, resultIsErr: true})
 			} else {
-				entries = append(entries, entry{styled: dimStyle.Render("  ✓ " + firstLine(msg.Content))})
+				entries = append(entries, entry{isToolResult: true, fullContent: msg.Content})
 			}
 		}
 	}

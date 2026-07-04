@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -114,6 +115,17 @@ type Model struct {
 	// stateInput, instead of being swallowed the way every keystroke
 	// while busy used to be.
 	queuedMessages []string
+	// inputHistory records every submitted (or queued) line, oldest
+	// first, for up/down recall — see navigateHistory in update.go.
+	// historyIdx is the index currently shown, or -1 when not navigating
+	// (the textarea holds whatever the user is actively composing).
+	// historyDraft is that in-progress composition, stashed on the first
+	// "up" so "down" back past the most recent entry can restore it,
+	// mirroring a shell's history behavior.
+	inputHistory []string
+	historyIdx   int
+	historyDraft string
+
 	// todos is the model's current task checklist, replaced wholesale
 	// on every successful update_todos call (see parseTodos in todo.go)
 	// — rendered as a persistent block in View, not appended to the
@@ -139,6 +151,11 @@ type Model struct {
 	// finishing on its own.
 	backgroundTasks map[string]*backgroundTask
 
+	// lastToolResultIdx is the entries index of the most recently
+	// appended tool-result entry, or -1 if none yet — ctrl+o
+	// (toggleLastToolResult) expands/collapses that one entry.
+	lastToolResultIdx int
+
 	// streamLineIdx is the index into entries of the assistant line
 	// currently being built from streamed text deltas, or -1 if none is
 	// in progress.
@@ -151,6 +168,16 @@ type Model struct {
 	// during it — never whatever the user already had unstaged before
 	// chisel touched anything.
 	preTurnDirty map[string]bool
+
+	// turnStartedAt marks when the current busy state (stateWaitingModel or
+	// stateExecutingTool) began — see startBusy — so the spinner line can
+	// show elapsed time instead of a static "thinking…"/"running…" label.
+	turnStartedAt time.Time
+	// permissionHint is the y/n/a(+esc) options string for the prompt
+	// currently on screen, computed once in dispatchNextTool alongside the
+	// prompt text itself — View() renders this instead of a hardcoded
+	// "(y/n)" that didn't always match what was actually offered.
+	permissionHint string
 
 	tokensIn, tokensOut int64
 	// requestCount counts real API round-trips this session — a normal
@@ -194,6 +221,14 @@ func (m *Model) newTurnContext() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelTurn = cancel
 	return ctx
+}
+
+// startBusy transitions into a busy state (stateWaitingModel or
+// stateExecutingTool) and stamps when it began, so the spinner line can
+// show elapsed time — see turnStartedAt.
+func (m *Model) startBusy(s state) {
+	m.state = s
+	m.turnStartedAt = time.Now()
 }
 
 // endTurn clears the stashed cancel func once a turn is fully done —
@@ -251,23 +286,25 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 	vp.MouseWheelEnabled = true
 
 	m := Model{
-		client:          client,
-		workDir:         workDir,
-		bash:            bash,
-		mcp:             mcpRegistry,
-		hooks:           hooksCfg,
-		permRules:       permRules,
-		memUser:         memUser,
-		memProject:      memProject,
-		customCommands:  customCommands,
-		checkpointStore: checkpointStore,
-		skills:          skills,
-		messages:        resumed,
-		textArea:        ta,
-		viewport:        vp,
-		spinner:         sp,
-		state:           stateInput,
-		streamLineIdx:   -1,
+		client:            client,
+		workDir:           workDir,
+		bash:              bash,
+		mcp:               mcpRegistry,
+		hooks:             hooksCfg,
+		permRules:         permRules,
+		memUser:           memUser,
+		memProject:        memProject,
+		customCommands:    customCommands,
+		checkpointStore:   checkpointStore,
+		skills:            skills,
+		messages:          resumed,
+		textArea:          ta,
+		viewport:          vp,
+		spinner:           sp,
+		state:             stateInput,
+		streamLineIdx:     -1,
+		historyIdx:        -1,
+		lastToolResultIdx: -1,
 	}
 
 	if memUser || memProject {
@@ -277,6 +314,12 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 	if len(resumed) > 0 {
 		m.entries = append(m.entries, entry{styled: resumeBanner(len(resumed), savedAt)})
 		m.entries = append(m.entries, renderHistory(resumed)...)
+		for i := len(m.entries) - 1; i >= 0; i-- {
+			if m.entries[i].isToolResult {
+				m.lastToolResultIdx = i
+				break
+			}
+		}
 	}
 
 	if len(m.entries) > 0 {
@@ -307,6 +350,37 @@ func (m *Model) appendLine(s string) {
 	m.refreshAndMaybeStickToBottom()
 }
 
+// appendPermissionLine appends an already-bordered permission-prompt box,
+// marked noRewrap so transcriptContent doesn't re-wrap (and mangle) its
+// border — see entry.noRewrap.
+func (m *Model) appendPermissionLine(s string) {
+	m.entries = append(m.entries, entry{styled: s, noRewrap: true})
+	m.refreshAndMaybeStickToBottom()
+}
+
+// appendToolResultEntry appends a tool call's result as a collapsed
+// (first-line-only) entry, remembering its index so a following ctrl+o
+// (toggleLastToolResult) can expand it — see entry.isToolResult.
+func (m *Model) appendToolResultEntry(content string, isErr bool) {
+	m.entries = append(m.entries, entry{isToolResult: true, fullContent: content, resultIsErr: isErr})
+	m.lastToolResultIdx = len(m.entries) - 1
+	m.refreshAndMaybeStickToBottom()
+}
+
+// toggleLastToolResult expands or collapses the most recent tool-result
+// entry (see appendToolResultEntry) — a no-op if there isn't one yet.
+func (m *Model) toggleLastToolResult() {
+	if m.lastToolResultIdx < 0 || m.lastToolResultIdx >= len(m.entries) {
+		return
+	}
+	if !m.entries[m.lastToolResultIdx].isToolResult {
+		return
+	}
+	m.entries[m.lastToolResultIdx].expanded = !m.entries[m.lastToolResultIdx].expanded
+	m.entries[m.lastToolResultIdx].cacheValid = false
+	m.refreshAndMaybeStickToBottom()
+}
+
 // appendAssistantEntry is appendLine's counterpart for text that should
 // be re-collapsible/expandable by /think — see entry.isAssistant.
 func (m *Model) appendAssistantEntry(raw string) {
@@ -318,12 +392,13 @@ func (m *Model) appendAssistantEntry(raw string) {
 // being streamed, starting a new line on the first delta of a turn.
 func (m *Model) appendStreamText(delta string) {
 	if m.streamLineIdx == -1 {
-		m.entries = append(m.entries, entry{isAssistant: true})
+		m.entries = append(m.entries, entry{isAssistant: true, streaming: true})
 		m.streamLineIdx = len(m.entries) - 1
 		m.streamText = ""
 	}
 	m.streamText += delta
 	m.entries[m.streamLineIdx].raw = m.streamText
+	m.entries[m.streamLineIdx].cacheValid = false // content just changed; see entry's own doc comment
 	m.refreshAndMaybeStickToBottom()
 }
 
@@ -344,11 +419,14 @@ func (m *Model) refreshAndMaybeStickToBottom() {
 // the current terminal size, minus the fixed input-box-and-status-bar
 // margin and however many lines the todo block currently needs — unlike
 // the input box, the todo block's height isn't fixed, so this has to be
-// redone whenever the todo list changes, not just on resize.
+// redone whenever the todo list changes, not just on resize. Measures the
+// todo block's actual wrapped line count rather than assuming one row per
+// item — a long item wraps to more than one terminal row at m.width, and
+// undercounting it here pushes the input box/status bar off-screen.
 func (m *Model) recomputeViewportHeight() {
 	extra := inputHeight + 3 // input box + status bar + margin
-	if n := len(m.todos); n > 0 {
-		extra += n + 1 // the todo block itself, plus the blank line separating it from the transcript
+	if todos := wrapToWidth(renderTodos(m.todos), m.width); todos != "" {
+		extra += strings.Count(todos, "\n") + 2 // the todo block itself, plus the blank line separating it from the transcript
 	}
 	m.viewport.Height = m.height - extra
 }
@@ -379,7 +457,15 @@ func (m *Model) syncMCPHealth() {
 
 // endStreamLine closes out the in-progress assistant line so the next text
 // block (if any, within the same or a later turn) starts a fresh one.
+// Marks the just-finished entry no longer streaming and invalidates its
+// cache — now that it's complete, the next render is what first makes it
+// eligible for markdown rendering (see renderMarkdownEntry), a different
+// result than whatever the streaming-plain-text render last cached.
 func (m *Model) endStreamLine() {
+	if m.streamLineIdx != -1 && m.streamLineIdx < len(m.entries) {
+		m.entries[m.streamLineIdx].streaming = false
+		m.entries[m.streamLineIdx].cacheValid = false
+	}
 	m.streamLineIdx = -1
 	m.streamText = ""
 }

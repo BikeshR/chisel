@@ -73,6 +73,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bangResultMsg:
 		return m.handleBangResult(msg)
 
+	case editorDoneMsg:
+		return m.handleEditorDone(msg)
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -90,6 +93,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.handleScrollKey(msg) {
 		return m, nil
+	}
+
+	// ctrl+o isn't bound by textarea's own default keymap, and expanding
+	// the last result is useful regardless of what else is going on
+	// (composing the next message, waiting on a permission decision), so
+	// it's handled here rather than only within stateInput.
+	if msg.Type == tea.KeyCtrlO {
+		m.toggleLastToolResult()
+		return m, nil
+	}
+
+	// ctrl+x (also unbound by default) opens $EDITOR on whatever's
+	// currently in the textarea — available whenever there's a textarea
+	// to edit, i.e. anything except the permission prompt's y/n/a.
+	if msg.Type == tea.KeyCtrlX && m.state != stateAwaitingPermission {
+		return m, startExternalEditor(m.textArea.Value())
 	}
 
 	switch m.state {
@@ -111,7 +130,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// makes an enter-approves binding dangerous: a reflexive
 			// enter can approve a bash command the user never actually read.
 			call := m.pendingUses[0]
-			m.state = stateExecutingTool
+			m.startBusy(stateExecutingTool)
 			m.appendLine(dimStyle.Render("  → approved"))
 			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, m.skills, call)
 		case "a", "A":
@@ -128,7 +147,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.sessionAllowlist[key] = true
 			}
-			m.state = stateExecutingTool
+			m.startBusy(stateExecutingTool)
 			m.appendLine(dimStyle.Render("  → approved (always allow for this session)"))
 			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, m.skills, call)
 		case "n", "N":
@@ -161,7 +180,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.submit()
 		}
 		if msg.Type == tea.KeyTab {
-			m.completeFileReferenceInInput()
+			// A slash command is only ever the first (and, while still
+			// being typed, only) token — once a space follows it, tab
+			// completion is back to @-file references, same as anywhere
+			// else in the message.
+			if value := strings.TrimRight(m.textArea.Value(), "\n"); strings.HasPrefix(value, "/") && !strings.ContainsAny(value, " \t\n") {
+				m.completeCommandInInput()
+			} else {
+				m.completeFileReferenceInInput()
+			}
+			return m, nil
+		}
+		// Only take over up/down for history recall when the textarea is
+		// a single line — otherwise these are the textarea's own cursor
+		// movement between lines of a multi-line draft, which must win.
+		if (msg.Type == tea.KeyUp || msg.Type == tea.KeyDown) && m.textArea.LineCount() == 1 {
+			m.navigateHistory(msg.Type == tea.KeyUp)
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -189,6 +223,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.textArea.Reset()
 			if text != "" {
 				m.queuedMessages = append(m.queuedMessages, text)
+				m.recordHistory(text)
 				m.appendLine(dimStyle.Render("  → queued: " + firstLine(text)))
 			}
 			return m, nil
@@ -234,6 +269,54 @@ func (m *Model) handleScrollKey(msg tea.KeyMsg) bool {
 	return false
 }
 
+// recordHistory appends text to the recall history for up/down (see
+// navigateHistory), skipping an exact repeat of the last entry so
+// repeatedly recalling and resubmitting the same line doesn't pile up
+// duplicates — same behavior as a shell's history. Also resets
+// navigation state: whatever was being recalled is now submitted, so
+// there's nothing left to return to via "down".
+func (m *Model) recordHistory(text string) {
+	if len(m.inputHistory) == 0 || m.inputHistory[len(m.inputHistory)-1] != text {
+		m.inputHistory = append(m.inputHistory, text)
+	}
+	m.historyIdx = -1
+	m.historyDraft = ""
+}
+
+// navigateHistory moves through inputHistory on up/down, stashing the
+// in-progress draft on the first "up" so "down" can restore it once
+// navigation passes the most recent entry — mirroring shell history
+// recall. A no-op if there's no history yet.
+func (m *Model) navigateHistory(up bool) {
+	if len(m.inputHistory) == 0 {
+		return
+	}
+	if up {
+		switch {
+		case m.historyIdx == -1:
+			m.historyDraft = m.textArea.Value()
+			m.historyIdx = len(m.inputHistory) - 1
+		case m.historyIdx > 0:
+			m.historyIdx--
+		default:
+			return // already at the oldest entry
+		}
+		m.textArea.SetValue(m.inputHistory[m.historyIdx])
+	} else {
+		if m.historyIdx == -1 {
+			return
+		}
+		m.historyIdx++
+		if m.historyIdx >= len(m.inputHistory) {
+			m.historyIdx = -1
+			m.textArea.SetValue(m.historyDraft)
+		} else {
+			m.textArea.SetValue(m.inputHistory[m.historyIdx])
+		}
+	}
+	m.textArea.CursorEnd()
+}
+
 func (m Model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSuffix(m.textArea.Value(), "\n")
 	m.textArea.Reset()
@@ -257,6 +340,8 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	if text == "" {
 		return m, nil
 	}
+
+	m.recordHistory(text)
 
 	if strings.HasPrefix(text, "/") {
 		var cmd tea.Cmd
@@ -299,7 +384,7 @@ func (m Model) submitText(text string) (Model, tea.Cmd) {
 	// time one's referenced.
 	m.messages = append(m.messages, agent.Message{Role: "user", Content: expandFileReferences(m.workDir, text)})
 	m.appendLine(userStyle.Render("you  ") + text)
-	m.state = stateWaitingModel
+	m.startBusy(stateWaitingModel)
 
 	ctx := m.newTurnContext()
 	return m, tea.Batch(
@@ -410,7 +495,7 @@ func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage, finis
 		// by an extra step in between.
 		if queued == nil && m.lastContextTokens >= contextWarnThreshold {
 			m.appendLine(dimStyle.Render("context is large — compacting automatically…"))
-			m.state = stateWaitingModel
+			m.startBusy(stateWaitingModel)
 			return m, tea.Batch(save, notify, autoCommitCmd, compact(m.newTurnContext(), m.client, m.messages))
 		}
 
@@ -469,8 +554,10 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 		m.awaitingLoopConfirmation = looping
 
 		options := "[y/n]"
+		m.permissionHint = "y/n · esc to deny"
 		if _, allowlistable := allowlistKey(call); allowlistable && !looping {
 			options = "[y/n/a]"
+			m.permissionHint = "y/n/a · esc to deny"
 		}
 
 		prompt := fmt.Sprintf("allow %s?  %s", summarizeCall(call), options)
@@ -487,11 +574,15 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 			prompt = fmt.Sprintf("%s has been called %d times in a row with identical arguments — this may be stuck in a loop.\n\n%s",
 				call.Function.Name, m.toolCallRepeatCount, prompt)
 		}
-		m.appendLine(permissionStyle.Render(prompt))
+		style := permissionStyle
+		if m.width > 0 {
+			style = style.Width(m.width)
+		}
+		m.appendPermissionLine(style.Render(prompt))
 		return m, notifyIdle("chisel needs your permission")
 
 	default: // permissionAllow
-		m.state = stateExecutingTool
+		m.startBusy(stateExecutingTool)
 		m.appendLine(toolStyle.Render("  " + summarizeCall(call)))
 		return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, m.skills, call)
 	}
@@ -513,9 +604,9 @@ func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
 	}
 
 	if result.IsError {
-		m.appendLine(errorStyle.Render("  ✗ " + firstLine(interruptibleResultText(result.Content))))
+		m.appendToolResultEntry(interruptibleResultText(result.Content), true)
 	} else {
-		m.appendLine(dimStyle.Render("  ✓ " + firstLine(result.Content)))
+		m.appendToolResultEntry(result.Content, false)
 		// Extracted from the call's own arguments, not result.Content —
 		// runUpdateTodos only returns a short confirmation string. Only
 		// on success: a call that failed validation shouldn't replace an
@@ -535,7 +626,7 @@ func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
 
 	m.messages = append(m.messages, m.pendingResults...)
 	m.pendingResults = nil
-	m.state = stateWaitingModel
+	m.startBusy(stateWaitingModel)
 	ctx := m.newTurnContext()
 	return m, tea.Batch(startStream(ctx, m.client, m.messages), saveSession(m.workDir, m.messages))
 }

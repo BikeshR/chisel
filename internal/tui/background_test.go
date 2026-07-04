@@ -219,7 +219,7 @@ func TestStatusLineShowsRunningBackgroundCount(t *testing.T) {
 		client:          agent.New("minimax-m3"),
 		backgroundTasks: map[string]*backgroundTask{"bg_1": {running: true}},
 	}
-	if got := m.statusLine(); !strings.Contains(got, "1 bg running") {
+	if got := m.statusLine(200); !strings.Contains(got, "1 bg running") {
 		t.Errorf("statusLine() = %q, want it to mention the running background task", got)
 	}
 }

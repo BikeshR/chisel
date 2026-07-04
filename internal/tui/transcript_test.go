@@ -75,3 +75,52 @@ func TestAppendAssistantEntrySupportsThinkToggle(t *testing.T) {
 		t.Error("toggling showThinking after appendAssistantEntry should reveal the think content")
 	}
 }
+
+func TestTranscriptContentRendersMarkdownForCompletedAssistantEntry(t *testing.T) {
+	m := Model{width: 80}
+	m.appendAssistantEntry("Some **bold** text.")
+
+	content := m.transcriptContent()
+	if strings.Contains(content, "**bold**") {
+		t.Errorf("expected markdown to be rendered rather than left as literal syntax, got: %q", content)
+	}
+	if !strings.Contains(content, "chisel") {
+		t.Errorf("expected the chisel prefix to survive markdown rendering, got: %q", content)
+	}
+}
+
+func TestTranscriptContentSkipsMarkdownWhileStreaming(t *testing.T) {
+	m := Model{width: 80, streamLineIdx: -1}
+	m.appendStreamText("Some **bold** text")
+
+	content := m.transcriptContent()
+	if !strings.Contains(content, "**bold**") {
+		t.Errorf("expected literal markdown syntax while still streaming, got: %q", content)
+	}
+}
+
+func TestTranscriptContentSkipsMarkdownWhenThinkTagsPresent(t *testing.T) {
+	m := Model{width: 80}
+	m.appendAssistantEntry("<think>hidden</think>Some **bold** text.")
+
+	content := m.transcriptContent()
+	if !strings.Contains(content, "**bold**") {
+		t.Errorf("expected renderAssistantText's plain-text path (not markdown) when raw contains think tags, got: %q", content)
+	}
+}
+
+func TestTranscriptContentCacheReflectsToolResultExpandToggle(t *testing.T) {
+	m := Model{width: 80}
+	m.appendToolResultEntry("line one\nline two\nline three", false)
+
+	collapsed := m.transcriptContent()
+	if strings.Contains(collapsed, "line two") {
+		t.Errorf("collapsed tool result should show only the first line, got: %q", collapsed)
+	}
+
+	m.toggleLastToolResult()
+	expanded := m.transcriptContent()
+	if !strings.Contains(expanded, "line two") {
+		t.Errorf("expanded tool result (post cache-invalidation) should show every line, got: %q", expanded)
+	}
+}

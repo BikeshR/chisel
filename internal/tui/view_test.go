@@ -14,7 +14,7 @@ func TestStatusLine(t *testing.T) {
 		tokensIn:          45200,
 		tokensOut:         8100,
 	}
-	line := m.statusLine()
+	line := m.statusLine(200)
 
 	if !strings.Contains(line, "minimax-m3") {
 		t.Errorf("status line = %q, want the model name", line)
@@ -35,7 +35,7 @@ func TestStatusLineWarnsPastThreshold(t *testing.T) {
 		client:            agent.New("minimax-m3"),
 		lastContextTokens: contextWarnThreshold + 1,
 	}
-	line := m.statusLine()
+	line := m.statusLine(200)
 	if !strings.Contains(line, "consider /compact") {
 		t.Errorf("status line = %q, want a /compact suggestion past the threshold", line)
 	}

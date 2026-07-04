@@ -80,12 +80,12 @@ func TestDispatchNextToolReadOnlyStillAllowedInPlanMode(t *testing.T) {
 func TestStatusLineShowsPlanMode(t *testing.T) {
 	client := agent.New("minimax-m3")
 	m := Model{client: client}
-	if strings.Contains(m.statusLine(), "PLAN MODE") {
+	if strings.Contains(m.statusLine(200), "PLAN MODE") {
 		t.Error("status line shows PLAN MODE with plan mode off")
 	}
 
 	client.SetPlanMode(true)
-	if !strings.Contains(m.statusLine(), "PLAN MODE") {
+	if !strings.Contains(m.statusLine(200), "PLAN MODE") {
 		t.Error("status line doesn't show PLAN MODE with plan mode on")
 	}
 }

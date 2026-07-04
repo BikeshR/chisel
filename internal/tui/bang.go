@@ -32,7 +32,7 @@ func (m Model) runBang(command string) (Model, tea.Cmd) {
 	}
 
 	m.appendLine(toolStyle.Render("! " + command))
-	m.state = stateExecutingTool
+	m.startBusy(stateExecutingTool)
 	ctx := m.newTurnContext()
 	bash := m.bash
 	return m, func() tea.Msg {
