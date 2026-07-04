@@ -37,6 +37,8 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 		return m.handleRetryCommand()
 	case "/status":
 		return m.handleStatusCommand(), nil
+	case "/rewind":
+		return m.handleRewindCommand(fields[1:]), nil
 	case "/help":
 		return m.handleHelpCommand(), nil
 	default:
@@ -79,6 +81,7 @@ const helpText = `commands:
   /git auto [on|off]    toggle auto-commit after each turn
   /plan                 toggle plan mode (read-only exploration only)
   /status               show workdir, session, hooks, MCP, and memory info
+  /rewind [n]           list checkpoints, or restore code+conversation to checkpoint n
 
 keys:
   enter                 submit · in a permission prompt, only y/Y approves · while busy, queues instead

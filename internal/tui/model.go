@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/checkpoint"
 	"github.com/BikeshR/chisel/internal/customcmd"
 	"github.com/BikeshR/chisel/internal/gitutil"
 	"github.com/BikeshR/chisel/internal/hooks"
@@ -97,6 +98,17 @@ type Model struct {
 	// log of every intermediate state.
 	todos []agent.TodoItem
 
+	// checkpointStore is nil if the shadow git repo couldn't be opened
+	// (see checkpoint.Open) — /rewind reports "not available" rather
+	// than chisel refusing to start over it. checkpoints records one
+	// entry per turn, oldest first, tying each shadow-repo commit back
+	// to a point in the conversation (see checkpointRecord). pendingRewind
+	// holds the target set by "/rewind <n>" until "/rewind confirm" (or
+	// a new turn starting) resolves it.
+	checkpointStore *checkpoint.Store
+	checkpoints     []checkpointRecord
+	pendingRewind   *checkpointRecord
+
 	// streamLineIdx is the index into entries of the assistant line
 	// currently being built from streamed text deltas, or -1 if none is
 	// in progress.
@@ -172,8 +184,10 @@ func interruptibleErrorText(err error) string {
 // which CHISEL.md files memory.Load found, just to show a startup line —
 // the content itself was already handed to the client via SetMemory.
 // customCommands comes from customcmd.Load — a nil/empty map is fine and
-// just means no custom commands are available.
-func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, customCommands map[string]customcmd.Command, resumed []agent.Message, savedAt time.Time) Model {
+// just means no custom commands are available. checkpointStore comes
+// from checkpoint.Open — nil is fine and just means /rewind reports
+// checkpoints as unavailable rather than chisel refusing to start.
+func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, customCommands map[string]customcmd.Command, checkpointStore *checkpoint.Store, resumed []agent.Message, savedAt time.Time) Model {
 	ta := textarea.New()
 	ta.Placeholder = "ask chisel to do something… (alt+enter for a new line, @path to reference a file, /help for commands)"
 	ta.Focus()
@@ -192,20 +206,21 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 	vp.MouseWheelEnabled = true
 
 	m := Model{
-		client:         client,
-		workDir:        workDir,
-		bash:           bash,
-		mcp:            mcpRegistry,
-		hooks:          hooksCfg,
-		memUser:        memUser,
-		memProject:     memProject,
-		customCommands: customCommands,
-		messages:       resumed,
-		textArea:       ta,
-		viewport:       vp,
-		spinner:        sp,
-		state:          stateInput,
-		streamLineIdx:  -1,
+		client:          client,
+		workDir:         workDir,
+		bash:            bash,
+		mcp:             mcpRegistry,
+		hooks:           hooksCfg,
+		memUser:         memUser,
+		memProject:      memProject,
+		customCommands:  customCommands,
+		checkpointStore: checkpointStore,
+		messages:        resumed,
+		textArea:        ta,
+		viewport:        vp,
+		spinner:         sp,
+		state:           stateInput,
+		streamLineIdx:   -1,
 	}
 
 	if memUser || memProject {

@@ -212,3 +212,33 @@ knowing: a `preToolUse` hook can still block a call after the user already
 approved it via the permission prompt — accepted rather than adding a
 second async round-trip before every permission decision just to
 pre-empt the prompt in the rare case a hook would've blocked it anyway.
+
+**Project-scoped doesn't automatically mean "needs a trust gate" — the
+question is whether it's code that runs, not where the file lives.**
+`internal/customcmd` also reads from a project directory
+(`<workDir>/.chisel/commands/*.md`), same as hooks, but deliberately
+has no trust prompt: a custom command is canned *prompt text*, and
+invoking one just sends that text through `submitText`, the exact path
+anything typed by hand goes through — whatever the model does in
+response still hits the normal permission gate. Hooks are different in
+kind, not just degree: `preToolUse`/`postToolUse` are shell commands
+that execute automatically, with no model or permission step in
+between. If you're adding a new project-scoped file format, the
+trust-gate question is "does loading/invoking this run something," not
+"is it project- or user-scoped."
+
+**A shadow git repository, kept entirely outside the project, is how
+checkpoint/rewind snapshots file state without touching the project's
+own git history.** `internal/checkpoint.Store` runs every git command
+as `git --git-dir=~/.chisel/checkpoints/<hash>/repo.git
+--work-tree=<realProjectDir> ...` — the standard technique for a repo
+whose metadata lives separately from what it tracks. This gets
+`.gitignore` handling for free (it's read from the work-tree regardless
+of which `--git-dir` is active) without ever creating a nested `.git`
+inside the project or interacting with `/git auto`'s own commits.
+`Restore` always checkpoints the current state first (labeled "before
+rewind") before `git reset --hard`ing backwards — git commits are
+append-only, so nothing is actually destroyed by rewinding past it,
+just no longer on the current line of history; a later `Restore` back
+to that same hash still works, and `internal/checkpoint/checkpoint_test.go`
+proves this against a real git subprocess rather than assuming it.

@@ -61,6 +61,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case checkpointCreatedMsg:
+		return m.handleCheckpointCreated(msg), nil
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -265,6 +268,9 @@ func (m Model) submitText(text string) (Model, tea.Cmd) {
 	}
 
 	m.syncMCPHealth()
+	m.pendingRewind = nil // a new turn starting cancels any pending /rewind confirmation
+
+	messageIndex := len(m.messages)
 
 	// The model sees @path expanded to the file's actual content; the
 	// transcript shows exactly what the user typed — otherwise a large
@@ -275,7 +281,11 @@ func (m Model) submitText(text string) (Model, tea.Cmd) {
 	m.state = stateWaitingModel
 
 	ctx := m.newTurnContext()
-	return m, tea.Batch(startStream(ctx, m.client, m.messages), saveSession(m.workDir, m.messages))
+	return m, tea.Batch(
+		startStream(ctx, m.client, m.messages),
+		saveSession(m.workDir, m.messages),
+		checkpointCmd(m.checkpointStore, firstLine(text), messageIndex),
+	)
 }
 
 // dequeueOrSubmit delivers the next message queued while chisel was
