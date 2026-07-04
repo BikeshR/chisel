@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -49,6 +50,10 @@ func LoadAndStartAll() (*Registry, []error) {
 // prefixed naming, as (name, description, inputSchema) triples ready to
 // become agent.Tool values — this package deliberately doesn't import
 // agent, so it stays a standalone protocol client usable outside chisel.
+// Sorted by name: r.servers is a map, whose iteration order Go randomizes
+// on purpose, and this list becomes part of every request's bytes — an
+// order that changes from call to call would be an unforced way to bust
+// any prompt caching keyed on a stable prefix.
 func (r *Registry) Tools() []Tool {
 	var tools []Tool
 	for name, s := range r.servers {
@@ -60,6 +65,7 @@ func (r *Registry) Tools() []Tool {
 			})
 		}
 	}
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	return tools
 }
 

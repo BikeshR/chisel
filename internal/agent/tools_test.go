@@ -68,8 +68,9 @@ func TestToolResultToMessage(t *testing.T) {
 	}
 
 	errResult := ToolResult{ID: "call_2", Content: "file not found", IsError: true}.ToMessage()
-	if errResult.Content != "Error: file not found" {
-		t.Errorf("error case: got content %q, want %q", errResult.Content, "Error: file not found")
+	want := ErrorContentPrefix + "file not found"
+	if errResult.Content != want {
+		t.Errorf("error case: got content %q, want %q", errResult.Content, want)
 	}
 }
 

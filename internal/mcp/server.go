@@ -150,7 +150,7 @@ func (s *Server) call(ctx context.Context, method string, params, result any) er
 	s.nextID++
 	id := s.nextID
 	if err := s.send(request{JSONRPC: "2.0", ID: id, Method: method, Params: params}); err != nil {
-		s.broken = true
+		s.markBroken()
 		return fmt.Errorf("write %s request: %w", method, err)
 	}
 
@@ -186,7 +186,7 @@ func (s *Server) call(ctx context.Context, method string, params, result any) er
 	select {
 	case r := <-done:
 		if r.err != nil {
-			s.broken = true
+			s.markBroken()
 			return r.err
 		}
 		if r.resp.Error != nil {
@@ -197,8 +197,34 @@ func (s *Server) call(ctx context.Context, method string, params, result any) er
 		}
 		return nil
 	case <-timeoutCtx.Done():
-		s.broken = true
+		s.markBroken()
 		return fmt.Errorf("%s timed out after %s", method, callTimeout)
+	}
+}
+
+// markBroken tears down the underlying process once the connection is
+// known to be unusable. Without this, a timeout in particular would leak
+// both the subprocess and the goroutine above still blocked reading from
+// it — for the rest of chisel's lifetime, since there's no automatic
+// reconnect in this version. Killing the process closes its stdout, which
+// unblocks that goroutine's read with an error it discards harmlessly (no
+// one is listening to its done channel anymore).
+//
+// Deliberately not calling cmd.Wait() here, even though that leaves the
+// process a zombie until Close() (called once, at chisel shutdown)
+// eventually reaps it: exec.Cmd.Wait is documented as unsafe to call
+// concurrently, and Close already calls it — calling it again from here
+// too, possibly at the same time, would just trade one race for another.
+func (s *Server) markBroken() {
+	if s.broken {
+		return
+	}
+	s.broken = true
+	if s.stdin != nil {
+		_ = s.stdin.Close()
+	}
+	if s.cmd != nil && s.cmd.Process != nil {
+		_ = s.cmd.Process.Kill()
 	}
 }
 

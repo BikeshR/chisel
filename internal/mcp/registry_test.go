@@ -24,6 +24,49 @@ func TestRegistryToolsAreNamespaced(t *testing.T) {
 	}
 }
 
+func TestRegistryToolsAreSortedDeterministically(t *testing.T) {
+	sA, err := Start("zzz-server", fakeServerConfig())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer sA.Close()
+	sB, err := Start("aaa-server", fakeServerConfig())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer sB.Close()
+
+	r := &Registry{servers: map[string]*Server{"zzz-server": sA, "aaa-server": sB}}
+
+	// r.servers is a map — Go randomizes its iteration order on purpose —
+	// so call Tools() repeatedly and confirm it's the same order every
+	// time, not just correct once by chance.
+	var want []string
+	for i := 0; i < 10; i++ {
+		tools := r.Tools()
+		got := make([]string, len(tools))
+		for j, tl := range tools {
+			got[j] = tl.Name
+		}
+		if i == 0 {
+			want = got
+			continue
+		}
+		if len(got) != len(want) {
+			t.Fatalf("call %d: got %d tools, want %d", i, len(got), len(want))
+		}
+		for j := range got {
+			if got[j] != want[j] {
+				t.Fatalf("call %d: order = %v, want the same order every call: %v", i, got, want)
+			}
+		}
+	}
+
+	if len(want) != 2 || want[0] != "mcp__aaa-server__echo" || want[1] != "mcp__zzz-server__echo" {
+		t.Errorf("order = %v, want alphabetical by name", want)
+	}
+}
+
 func TestRegistryCall(t *testing.T) {
 	s, err := Start("fake", fakeServerConfig())
 	if err != nil {

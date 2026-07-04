@@ -90,23 +90,21 @@ func RunSubagent(ctx context.Context, workDir, model, task string) (string, erro
 			return "", fmt.Errorf("subagent turn %d: %w", turn, err)
 		}
 
-		var final Event
-		for ev := range ch {
-			if ev.Done {
-				final = ev
-			}
-		}
-		if final.Err != nil {
-			return "", fmt.Errorf("subagent turn %d: %w", turn, final.Err)
+		msg, _, err := Drain(ch)
+		if err != nil {
+			return "", fmt.Errorf("subagent turn %d: %w", turn, err)
 		}
 
-		history = append(history, *final.Message)
+		history = append(history, *msg)
 
-		if final.FinishReason != "tool_calls" || len(final.Message.ToolCalls) == 0 {
-			return final.Message.Content, nil
+		// Go by whether the message actually has tool calls, not
+		// finish_reason — see the same fix and reasoning in
+		// internal/tui/update.go's handleStreamComplete.
+		if len(msg.ToolCalls) == 0 {
+			return msg.Content, nil
 		}
 
-		for _, call := range final.Message.ToolCalls {
+		for _, call := range msg.ToolCalls {
 			result := Execute(ctx, workDir, model, call, nil) // subagentTools never dispatches to bash
 			history = append(history, result.ToMessage())
 		}

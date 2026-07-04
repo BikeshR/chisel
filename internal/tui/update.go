@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/gitutil"
 )
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -65,6 +66,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch m.state {
 	case stateAwaitingPermission:
+		// stateAwaitingPermission is only ever entered with a non-empty
+		// pendingUses (dispatchNextTool sets both together), but that's a
+		// convention enforced by control flow, not the type system — a
+		// future change to how this state gets entered could violate it,
+		// and indexing [0] below would then panic instead of just no-oping.
+		if len(m.pendingUses) == 0 {
+			m.state = stateInput
+			return m, nil
+		}
 		switch msg.String() {
 		case "y", "Y", "enter":
 			call := m.pendingUses[0]
@@ -107,6 +117,16 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, textinput.Blink)
 	}
 
+	if m.autoCommit {
+		// Snapshot before this turn's actions, not just before this
+		// message — so /git auto's eventual commit can be scoped to
+		// what changed during it, excluding anything the user already
+		// had unstaged. Best-effort: if it fails, preTurnDirty stays
+		// nil, which CommitNewlyChanged treats as "nothing was already
+		// dirty" — a fresh session's zero value behaves the same way.
+		m.preTurnDirty, _ = gitutil.DirtyPaths(m.workDir)
+	}
+
 	m.messages = append(m.messages, agent.Message{Role: "user", Content: text})
 	m.appendLine(userStyle.Render("you  ") + text)
 	m.state = stateWaitingModel
@@ -137,34 +157,52 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	return m.handleStreamComplete(*ev.Message, ev.FinishReason, ev.Usage)
+	return m.handleStreamComplete(*ev.Message, ev.Usage)
 }
 
-func (m Model) handleStreamComplete(resp agent.Message, finishReason string, usage agent.Usage) (tea.Model, tea.Cmd) {
+func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage) (tea.Model, tea.Cmd) {
 	m.endStreamLine()
 
 	m.messages = append(m.messages, resp)
 	m.tokensIn += usage.InputTokens
 	m.tokensOut += usage.OutputTokens
 	m.lastContextTokens = usage.InputTokens
+	// Go by whether the message actually has tool calls, not the
+	// provider's finish_reason field — a provider can (and does, in
+	// practice) report finish_reason: "stop" while still returning a
+	// non-empty tool_calls array, and trusting finish_reason there would
+	// silently skip dispatching them.
 	m.pendingUses = resp.ToolCalls
-	save := saveSession(m.workDir, m.messages)
 
-	if finishReason != "tool_calls" || len(m.pendingUses) == 0 {
+	if len(m.pendingUses) == 0 {
 		m.state = stateInput
+		save := saveSession(m.workDir, m.messages)
 		if m.autoCommit {
-			return m, tea.Batch(save, autoCommit(m.workDir, lastUserText(m.messages)))
+			return m, tea.Batch(save, autoCommit(m.workDir, m.preTurnDirty, lastUserText(m.messages)))
 		}
 		return m, save
 	}
 
-	next, cmd := m.dispatchNextTool()
-	return next, tea.Batch(save, cmd)
+	// Deliberately not saving here: resp (just appended above) carries
+	// tool_calls with no matching "tool" result messages yet, and that's
+	// an invalid history to persist — every future request replaying a
+	// session saved in this state gets rejected by the API. handleToolResult
+	// saves once every pending call is actually resolved (executed,
+	// denied, or blocked), whichever comes first.
+	return m.dispatchNextTool()
 }
 
 // dispatchNextTool looks at the front of the pending tool-use queue and
 // either asks for permission or runs it immediately.
 func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
+	// Every current caller only reaches here with a non-empty queue
+	// (handleStreamComplete and handleToolResult both check first), but
+	// that's enforced by their control flow, not by this function itself
+	// — guard it directly rather than relying on callers to keep doing so.
+	if len(m.pendingUses) == 0 {
+		m.state = stateInput
+		return m, nil
+	}
 	call := m.pendingUses[0]
 
 	// Plan mode hard-denies anything that would otherwise need permission
@@ -223,11 +261,11 @@ func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
 func firstLine(s string) string {
 	for i, r := range s {
 		if r == '\n' {
-			return s[:i]
+			return s[:i] // safe: i is the byte offset of a single-byte '\n', always a rune boundary
 		}
 	}
-	if len(s) > 120 {
-		return s[:120] + "…"
+	if truncated, ok := truncateRunes(s, 120); ok {
+		return truncated + "…"
 	}
 	return s
 }

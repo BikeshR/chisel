@@ -74,7 +74,13 @@ UX simple (one y/n prompt at a time) at the cost of throughput.
 `agent.resolveInWorkDir`.** It rejects absolute paths outside the working
 directory, `..` traversal, and symlinks that resolve outside it. Any new
 filesystem-touching tool must go through this, not `os.Open`/`os.Create`
-directly.
+directly — `grep`/`glob` (`search.go`) originally didn't, and opened
+`filepath.WalkDir`/`doublestar.Glob` matches directly, so a symlink
+inside the working directory pointing outside it was followed silently
+with no permission prompt. Both now filter every candidate path through
+`resolveInWorkDir` first. If you're writing a new tool that touches
+files by any path chisel didn't construct itself, assume it needs the
+same check.
 
 **Permission gating is name- and command-based, not path-based.**
 `agent.NeedsPermission` (`tools.go`) hardcodes: `bash` always needs
@@ -139,6 +145,30 @@ mutating anything — glob, grep, and `view` (a read-only-only variant of
 the editor tool, with no create/str_replace/insert command in the schema
 at all) — so a subagent needs no permission gate in the first place;
 there's nothing to gate.
+
+**A goroutine spawned inside a timeout-bounded call must not touch the
+owning struct's fields after the call returns — capture what it needs as
+locals first.** `BashSession.run` and `mcp.Server.call` both spawn a
+goroutine to do a blocking read while the caller waits on a `select`
+against a timeout. On timeout, the caller returns *before* that goroutine
+finishes — it's still out there, still running. If it reads `s.reader`/
+`s.marker` (or equivalent) as live struct fields rather than local
+copies taken before the goroutine started, a concurrent `stop()`/
+`start()` (from the *next* call) racing with it can nil-deref it or hand
+it the next session's data. Both now snapshot what the goroutine needs
+into locals before spawning it.
+
+**`exec.Cmd.Wait` has exactly one legal caller, ever — plan for that up
+front.** It's documented as unsafe to call from two goroutines, and
+calling it twice on the same `Cmd` after the first call already
+completed is itself an error. `mcp.Server.markBroken` (on a timeout)
+kills the process but *deliberately does not* call `Wait` on it, even
+though that leaves a zombie until `Close` (called once, at shutdown)
+reaps it later — the first version of this fix spawned a background
+`Wait()` in `markBroken` "to reap it promptly," and that raced with
+`Close`'s own `Wait()` under `-race`. If you need eager reaping,
+restructure so only one path ever owns the `Wait` call — don't add a
+second one relying on timing.
 
 **Hooks are project-scoped; everything else config-like is user-scoped —
 that split is intentional, not an inconsistency.** `internal/hooks` reads

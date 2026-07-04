@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -55,6 +56,11 @@ type Model struct {
 	streamText    string
 	showThinking  bool // /think toggles this; collapsed by default
 	autoCommit    bool // /git auto toggles this; off by default
+	// preTurnDirty is a gitutil.DirtyPaths snapshot taken at the start of
+	// each turn (see submit), so /git auto can commit only what changed
+	// during it — never whatever the user already had unstaged before
+	// chisel touched anything.
+	preTurnDirty map[string]bool
 
 	tokensIn, tokensOut int64
 	// lastContextTokens is the prompt size of the most recent request —
@@ -137,14 +143,7 @@ func (m *Model) appendLine(s string) {
 }
 
 func joinLines(lines []string) string {
-	out := ""
-	for i, l := range lines {
-		if i > 0 {
-			out += "\n"
-		}
-		out += l
-	}
-	return out
+	return strings.Join(lines, "\n")
 }
 
 // appendStreamText appends a text delta to the assistant line currently
@@ -266,21 +265,25 @@ func saveSession(workDir string, messages []agent.Message) tea.Cmd {
 	}
 }
 
-// autoCommit stages and commits any changes chisel made this turn, if
-// /git auto is on. Returning a nil Msg (via the early returns below) is
-// deliberate — "nothing to commit" and "not a repo" aren't events worth a
-// line in the transcript every single turn.
-func autoCommit(workDir string, userText string) tea.Cmd {
+// autoCommit stages and commits whatever changed since preTurnDirty was
+// captured, if /git auto is on — never a blanket `git add -A`, which
+// would also sweep up any unrelated work the user already had unstaged
+// in the same working tree before this turn started. Returning a nil Msg
+// (via the early returns below) is deliberate — "nothing to commit" and
+// "not a repo" aren't events worth a line in the transcript every turn.
+func autoCommit(workDir string, preTurnDirty map[string]bool, userText string) tea.Cmd {
 	return func() tea.Msg {
 		if !gitutil.IsRepo(workDir) {
 			return nil
 		}
-		changed, err := gitutil.HasChanges(workDir)
-		if err != nil || !changed {
+		sha, err := gitutil.CommitNewlyChanged(workDir, preTurnDirty, commitMessage(userText))
+		if err != nil {
+			return autoCommitResultMsg{err: err}
+		}
+		if sha == "" {
 			return nil
 		}
-		sha, err := gitutil.CommitAll(workDir, commitMessage(userText))
-		return autoCommitResultMsg{sha: sha, err: err}
+		return autoCommitResultMsg{sha: sha}
 	}
 }
 
@@ -289,10 +292,24 @@ func autoCommit(workDir string, userText string) tea.Cmd {
 func commitMessage(userText string) string {
 	const maxLen = 72
 	subject := firstLine(userText)
-	if len(subject) > maxLen {
-		subject = subject[:maxLen] + "…"
+	if truncated, ok := truncateRunes(subject, maxLen); ok {
+		subject = truncated + "…"
 	}
 	return "chisel: " + subject
+}
+
+// truncateRunes cuts s to at most maxRunes runes. Slicing a string by
+// byte count (s[:n]) can land in the middle of a multi-byte UTF-8
+// character and produce invalid, garbled output — this always cuts on a
+// rune boundary instead. ok reports whether s was actually longer than
+// maxRunes (so callers know whether to append their own "truncated"
+// marker).
+func truncateRunes(s string, maxRunes int) (truncated string, ok bool) {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s, false
+	}
+	return string(runes[:maxRunes]), true
 }
 
 // lastUserText returns the most recent user message in messages, for
@@ -325,16 +342,11 @@ func compact(client *agent.Client, messages []agent.Message) tea.Cmd {
 			return compactResultMsg{err: err}
 		}
 
-		var final agent.Event
-		for ev := range ch {
-			if ev.Done {
-				final = ev
-			}
+		msg, usage, err := agent.Drain(ch)
+		if err != nil {
+			return compactResultMsg{err: err}
 		}
-		if final.Err != nil {
-			return compactResultMsg{err: final.Err}
-		}
-		return compactResultMsg{summary: final.Message.Content, usage: final.Usage}
+		return compactResultMsg{summary: msg.Content, usage: usage}
 	}
 }
 

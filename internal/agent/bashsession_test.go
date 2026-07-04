@@ -190,3 +190,21 @@ func TestRunBashThroughSession(t *testing.T) {
 		t.Errorf("output = %q", out)
 	}
 }
+
+// TestRunBashNilSessionDoesNotPanic is the regression test for a
+// nil-deref-if-unreachable risk: RunSubagent passes a nil *BashSession to
+// Execute (subagentTools() never offers "bash", so it's never supposed to
+// be dispatched), and nothing enforces that at the type level — a
+// hallucinated "bash" tool call reaching here, however unlikely, must
+// fail cleanly rather than panic on a nil receiver.
+func TestRunBashNilSessionDoesNotPanic(t *testing.T) {
+	input, err := json.Marshal(bashInput{Command: "echo hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = runBash(context.Background(), nil, input)
+	if err == nil {
+		t.Fatal("expected an error for a nil session, got nil")
+	}
+}

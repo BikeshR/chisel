@@ -41,14 +41,29 @@ func TestRenderHistory(t *testing.T) {
 
 func TestRenderHistoryErrorToolResult(t *testing.T) {
 	messages := []agent.Message{
-		{Role: "tool", ToolCallID: "call_1", Content: "Error: permission denied"},
+		{Role: "tool", ToolCallID: "call_1", Content: agent.ErrorContentPrefix + "permission denied"},
 	}
 	lines := renderHistory(messages, false)
 	if len(lines) != 1 || !strings.Contains(lines[0], "✗") || !strings.Contains(lines[0], "permission denied") {
-		t.Errorf("lines = %+v, want a single failure line without the raw \"Error: \" prefix", lines)
+		t.Errorf("lines = %+v, want a single failure line without the raw error-marker prefix", lines)
 	}
-	if strings.Contains(lines[0], "Error: ") {
-		t.Errorf("lines[0] = %q, want the \"Error: \" wire prefix stripped", lines[0])
+	if strings.Contains(lines[0], agent.ErrorContentPrefix) {
+		t.Errorf("lines[0] = %q, want the wire error-marker prefix stripped", lines[0])
+	}
+}
+
+// TestRenderHistoryDoesNotFalsePositiveOnErrorLookingContent is the
+// direct regression test for why ErrorContentPrefix isn't just "Error: "
+// — genuine, successful tool output that happens to start with that
+// common phrase must not be mistaken for a failure when a session is
+// resumed and its history reconstructed from raw text alone.
+func TestRenderHistoryDoesNotFalsePositiveOnErrorLookingContent(t *testing.T) {
+	messages := []agent.Message{
+		{Role: "tool", ToolCallID: "call_1", Content: "Error: this is just a log message the command printed, not a failure"},
+	}
+	lines := renderHistory(messages, false)
+	if len(lines) != 1 || !strings.Contains(lines[0], "✓") {
+		t.Errorf("lines = %+v, want a success line — content starting with the English phrase \"Error: \" isn't chisel's own error marker", lines)
 	}
 }
 

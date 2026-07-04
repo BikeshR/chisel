@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -145,6 +146,44 @@ func TestServerCallToolTimeout(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "restart chisel") {
 		t.Errorf("expected the second call to fail fast with a reconnect message, got: %v", err)
 	}
+}
+
+func TestServerCallToolTimeoutKillsProcess(t *testing.T) {
+	old := callTimeout
+	callTimeout = 200 * time.Millisecond
+	defer func() { callTimeout = old }()
+
+	s, err := Start("fake", fakeServerConfig())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	pid := s.cmd.Process.Pid
+
+	_, _, err = s.CallTool(context.Background(), "hang", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+
+	// markBroken kills the process but deliberately doesn't Wait() on it
+	// (that's Close's job, called once at shutdown — see markBroken's own
+	// comment for why) — so right after a timeout it's a zombie, not
+	// fully gone. Checking /proc directly for that Z state confirms it
+	// was actually killed rather than left running and leaked; reading
+	// s.cmd.ProcessState here instead would race with Close's later Wait().
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		state, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return // already reaped somehow — also fine, definitely not leaked running
+		}
+		if fields := strings.Fields(string(state)); len(fields) > 2 && fields[2] == "Z" {
+			return // zombie: killed, awaiting reap at Close — not leaked running
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("process was still running 2s after a timeout — it's leaked, not killed")
 }
 
 func TestStartUnknownCommand(t *testing.T) {

@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/BikeshR/chisel/internal/agent"
@@ -100,6 +101,57 @@ func TestClear(t *testing.T) {
 	// Clearing again (nothing left to remove) must not be an error.
 	if err := Clear(workDir); err != nil {
 		t.Errorf("Clear on an already-cleared session: %v", err)
+	}
+}
+
+func TestSaveWritesAtomicallyNoLeftoverTempFile(t *testing.T) {
+	home := withHome(t)
+	workDir := "/home/brana/code/testproj"
+
+	if err := Save(workDir, []agent.Message{{Role: "user", Content: "hi"}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(home, ".chisel", "sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("leftover temp file after Save: %s", e.Name())
+		}
+	}
+
+	path, err := Path(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("file mode = %o, want 0600", perm)
+	}
+}
+
+func TestSaveOverwritesPreviousContentCompletely(t *testing.T) {
+	withHome(t)
+	workDir := "/home/brana/code/testproj"
+
+	long := []agent.Message{{Role: "user", Content: strings.Repeat("x", 10_000)}}
+	if err := Save(workDir, long); err != nil {
+		t.Fatal(err)
+	}
+
+	short := []agent.Message{{Role: "user", Content: "short"}}
+	if err := Save(workDir, short); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, ok := Load(workDir)
+	if !ok || len(got) != 1 || got[0].Content != "short" {
+		t.Errorf("got = %+v, ok=%v, want just the short overwrite with no trailing garbage from the longer previous save", got, ok)
 	}
 }
 

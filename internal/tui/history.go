@@ -28,7 +28,7 @@ func renderHistory(messages []agent.Message, showThinking bool) []string {
 			}
 
 		case "tool":
-			if rest, isErr := strings.CutPrefix(msg.Content, "Error: "); isErr {
+			if rest, isErr := strings.CutPrefix(msg.Content, agent.ErrorContentPrefix); isErr {
 				lines = append(lines, errorStyle.Render("  ✗ "+firstLine(rest)))
 			} else {
 				lines = append(lines, dimStyle.Render("  ✓ "+firstLine(msg.Content)))

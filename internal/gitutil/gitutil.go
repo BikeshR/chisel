@@ -18,22 +18,59 @@ func IsRepo(dir string) bool {
 	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
 
-// HasChanges reports whether dir has any uncommitted changes, staged or
-// not, tracked or not.
-func HasChanges(dir string) (bool, error) {
+// DirtyPaths returns the set of paths git considers changed in dir —
+// staged or not, tracked or not — as they appear in `git status
+// --porcelain` (relative to dir).
+func DirtyPaths(dir string) (map[string]bool, error) {
 	cmd := exec.Command("git", "status", "--porcelain")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
-		return false, fmt.Errorf("git status: %w", err)
+		return nil, fmt.Errorf("git status: %w", err)
 	}
-	return len(strings.TrimSpace(string(out))) > 0, nil
+
+	paths := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		// Porcelain format is "XY path" (or "XY orig -> new" for a
+		// rename) — the status codes are exactly 2 characters, then a
+		// space, then the path.
+		path := line[3:]
+		if _, new, ok := strings.Cut(path, " -> "); ok {
+			path = new
+		}
+		paths[strings.Trim(path, `"`)] = true
+	}
+	return paths, nil
 }
 
-// CommitAll stages every change in dir and commits it with message,
-// returning the new commit's short SHA.
-func CommitAll(dir, message string) (sha string, err error) {
-	add := exec.Command("git", "add", "-A")
+// CommitNewlyChanged stages only the paths that are dirty now but
+// weren't in before, and commits them with message — before is typically
+// a DirtyPaths snapshot taken right when a turn started. Committing only
+// the diff against that snapshot, rather than every currently-dirty path
+// (`git add -A` would), is what keeps auto-commit from sweeping up
+// whatever unrelated, unstaged work the user already had sitting in the
+// same working tree before chisel touched anything. Returns "" (no
+// error) if nothing new turned up to commit.
+func CommitNewlyChanged(dir string, before map[string]bool, message string) (sha string, err error) {
+	after, err := DirtyPaths(dir)
+	if err != nil {
+		return "", err
+	}
+
+	var newPaths []string
+	for p := range after {
+		if !before[p] {
+			newPaths = append(newPaths, p)
+		}
+	}
+	if len(newPaths) == 0 {
+		return "", nil
+	}
+
+	add := exec.Command("git", append([]string{"add", "--"}, newPaths...)...)
 	add.Dir = dir
 	if out, err := add.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("git add: %w: %s", err, out)

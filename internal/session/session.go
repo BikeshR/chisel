@@ -73,7 +73,8 @@ func Save(workDir string, messages []agent.Message) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 
@@ -81,7 +82,31 @@ func Save(workDir string, messages []agent.Message) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+
+	// Write to a temp file and rename into place rather than writing path
+	// directly: an in-place write truncates the existing file first, so a
+	// crash (or any interruption) partway through leaves a truncated,
+	// unparseable session behind. Rename is atomic on the same
+	// filesystem — path always ends up as either the old content or the
+	// complete new content, never a partial write.
+	tmp, err := os.CreateTemp(dir, ".session-*.json.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }() // no-op once the rename below succeeds
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // Clear removes the saved session for workDir, if any. Not an error if

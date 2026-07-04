@@ -144,6 +144,16 @@ func (s *BashSession) run(ctx context.Context, command string) (string, error) {
 		return "", fmt.Errorf("write command: %w", err)
 	}
 
+	// Captured locally rather than read as s.reader/s.marker inside the
+	// goroutine below: on timeout, run returns while that goroutine is
+	// still alive, and a later call's stop()/start() can concurrently nil
+	// out or replace those fields — an unsynchronized read of s.reader
+	// there would race (and could nil-deref, or start reading the next
+	// session's output entirely) with no lock protecting the goroutine
+	// itself.
+	reader := s.reader
+	marker := s.marker
+
 	type result struct {
 		output string
 		code   int
@@ -154,8 +164,8 @@ func (s *BashSession) run(ctx context.Context, command string) (string, error) {
 	go func() {
 		var out strings.Builder
 		for {
-			line, readErr := s.reader.ReadString('\n')
-			if code, ok := strings.CutPrefix(strings.TrimRight(line, "\n"), s.marker); ok {
+			line, readErr := reader.ReadString('\n')
+			if code, ok := strings.CutPrefix(strings.TrimRight(line, "\n"), marker); ok {
 				n, perr := strconv.Atoi(code)
 				if perr != nil {
 					done <- result{output: out.String(), err: fmt.Errorf("parse exit code from %q: %w", code, perr)}

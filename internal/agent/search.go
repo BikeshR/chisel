@@ -75,6 +75,18 @@ func runGlob(workDir string, rawInput json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	// os.DirFS doesn't defend against symlinks pointing outside workDir
+	// (its own docs say as much) — filter out anything that resolves
+	// elsewhere, the same check every other filesystem tool goes through.
+	safe := matches[:0]
+	for _, m := range matches {
+		if _, err := resolveInWorkDir(workDir, m); err == nil {
+			safe = append(safe, m)
+		}
+	}
+	matches = safe
+
 	if len(matches) == 0 {
 		return "(no matches)", nil
 	}
@@ -122,7 +134,16 @@ func runGrep(workDir string, rawInput json.RawMessage) (string, error) {
 			}
 		}
 
-		f, err := os.Open(path)
+		// WalkDir visits a symlink as a leaf entry without following it
+		// for traversal, but opening it directly (as below) would follow
+		// it to wherever it points — resolveInWorkDir is what every other
+		// filesystem tool goes through to reject that; grep skipped it.
+		resolved, err := resolveInWorkDir(workDir, rel)
+		if err != nil {
+			return nil // escapes the working directory — skip silently, same as an unreadable file
+		}
+
+		f, err := os.Open(resolved)
 		if err != nil {
 			return nil // unreadable file, skip
 		}

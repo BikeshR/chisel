@@ -57,7 +57,7 @@ func New(model string) *Client {
 		baseURL = defaultBaseURL
 	}
 	return &Client{
-		http:    &http.Client{Timeout: 5 * time.Minute},
+		http:    &http.Client{Transport: newTransport()},
 		baseURL: baseURL,
 		apiKey:  os.Getenv("CHISEL_API_KEY"),
 		model:   model,
@@ -65,9 +65,33 @@ func New(model string) *Client {
 	}
 }
 
+// newTransport bounds how long a request can wait for a response to
+// *start* — a genuinely stuck connection that never replies at all —
+// without bounding how long a streaming response body can keep sending
+// chunks afterward. http.Client.Timeout can't express that distinction:
+// its docs are explicit that it "includes ... reading the response
+// body", so a flat 5-minute Client.Timeout (the previous approach here)
+// would abort a long but actively-streaming turn — a big multi-tool-call
+// response, or just a verbose model — well before anything was actually
+// wrong.
+func newTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = 60 * time.Second
+	return t
+}
+
 // ModelName returns the model this client sends every request to.
 func (c *Client) ModelName() string {
 	return c.model
+}
+
+// SetModel switches which model this client sends requests to, in place
+// — unlike constructing a fresh Client via New, this preserves whatever
+// was already configured on it: MCP tools added via AddTools, plan mode,
+// and memory content. Switching the model is not the same thing as
+// starting over.
+func (c *Client) SetModel(model string) {
+	c.model = model
 }
 
 // AddTools appends to the tool set sent with every request — for tools
@@ -278,4 +302,36 @@ func decodeStream(body io.ReadCloser, ch chan<- Event) {
 	}
 
 	ch <- Event{Done: true, Message: &msg, FinishReason: finishReason, Usage: usage}
+}
+
+// Drain reads ch to completion and returns the final response. Every
+// caller that only cares about the end result (not the streamed text
+// deltas along the way — chisel's own conversation loop in internal/tui
+// does care and drains the channel itself instead) should go through
+// this rather than hand-rolling "loop until Done, then check Err" and
+// dereferencing Message directly: decodeStream's contract is that a Done
+// event with Err == nil always carries a non-nil Message, but a contract
+// enforced only by convention at the producer is exactly the kind of
+// thing a future change can quietly break, and a bare `*final.Message`
+// at every call site would then panic instead of erroring cleanly. This
+// checks it once, explicitly.
+func Drain(ch <-chan Event) (*Message, Usage, error) {
+	var final Event
+	var gotDone bool
+	for ev := range ch {
+		if ev.Done {
+			final = ev
+			gotDone = true
+		}
+	}
+	if !gotDone {
+		return nil, Usage{}, fmt.Errorf("stream closed without a final response")
+	}
+	if final.Err != nil {
+		return nil, Usage{}, final.Err
+	}
+	if final.Message == nil {
+		return nil, Usage{}, fmt.Errorf("no response from model")
+	}
+	return final.Message, final.Usage, nil
 }

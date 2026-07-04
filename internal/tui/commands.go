@@ -140,7 +140,7 @@ func (m Model) handleModelCommand(args []string) (Model, tea.Cmd) {
 	}
 
 	name := args[0]
-	m.client = agent.New(name)
+	m.client.SetModel(name)
 	m.appendLine(dimStyle.Render("switched to " + name))
 	return m, nil
 }
@@ -160,16 +160,11 @@ func checkModel(name string) tea.Cmd {
 			return modelCheckResultMsg{model: name, err: err}
 		}
 
-		var final agent.Event
-		for ev := range ch {
-			if ev.Done {
-				final = ev
-			}
+		msg, _, err := agent.Drain(ch)
+		if err != nil {
+			return modelCheckResultMsg{model: name, err: err}
 		}
-		if final.Err != nil {
-			return modelCheckResultMsg{model: name, err: final.Err}
-		}
-		return modelCheckResultMsg{model: name, reply: final.Message.Content}
+		return modelCheckResultMsg{model: name, reply: msg.Content}
 	}
 }
 

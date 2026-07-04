@@ -36,13 +36,25 @@ type ToolResult struct {
 	IsError bool
 }
 
+// ErrorContentPrefix marks a tool result's content as an error when
+// folded into a "tool" role message — chat-completions has no dedicated
+// wire field for this, so the model (and, when resuming a saved session,
+// internal/tui/history.go) has to recover it from the text. Deliberately
+// not a plain phrase like "Error: ": that's plausible as the literal
+// start of genuine tool output too (a bash command's own stdout, a file
+// whose first line happens to read that way), which would make a resumed
+// session's history rendering mistake a real success for a failure. This
+// is still clearly readable as "this failed", just a much
+// lower-collision-risk marker than ordinary English.
+const ErrorContentPrefix = "[chisel:error] "
+
 // ToMessage renders a ToolResult as the "tool" message OpenAI's chat
 // format expects. There's no dedicated wire field for "this was an
 // error" — that convention folds it into the content text instead.
 func (r ToolResult) ToMessage() Message {
 	content := r.Content
 	if r.IsError {
-		content = "Error: " + content
+		content = ErrorContentPrefix + content
 	}
 	return Message{Role: "tool", ToolCallID: r.ID, Content: content}
 }
