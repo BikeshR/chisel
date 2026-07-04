@@ -11,6 +11,27 @@ func buildTools() []Tool {
 		editorTool(),
 		globTool(),
 		grepTool(),
+		subagentDispatchTool(),
+	}
+}
+
+func subagentDispatchTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "dispatch_subagent",
+			Description: "Delegate a self-contained research or exploration task to a subagent with a narrower, read-only tool set (glob, grep, view — no edits, no shell commands, no further subagents). Use this to investigate something without cluttering your own context with every intermediate exploration step; you get back one concise final answer. Good for open-ended \"find out how X works\" or \"search for all usages of Y and summarize\" tasks. The subagent starts fresh with no access to this conversation, so describe the task fully and self-contained.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"task": map[string]any{
+						"type":        "string",
+						"description": "A complete, self-contained description of what to investigate and report back on.",
+					},
+				},
+				"required": []string{"task"},
+			},
+		},
 	}
 }
 

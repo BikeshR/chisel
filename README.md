@@ -34,6 +34,11 @@ a plan rather than make changes, and any mutating action it tries anyway
 is refused outright — not just discouraged by the prompt. `/plan` again
 to exit and allow changes.
 
+The model can delegate research or exploration to a subagent — a
+narrower, read-only child (glob, grep, view only — no edits, no shell,
+no permission gate needed) that reports back one concise answer without
+filling up the main conversation with every intermediate step.
+
 ## MCP servers
 
 List servers in `~/.chisel/mcp.json` — same `mcpServers` shape Claude

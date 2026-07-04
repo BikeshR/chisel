@@ -144,7 +144,7 @@ func (m *Model) endStreamLine() {
 	m.streamText = ""
 }
 
-func executeTool(workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, call agent.ToolCall) tea.Cmd {
+func executeTool(workDir, model string, bash *agent.BashSession, mcpRegistry *mcp.Registry, call agent.ToolCall) tea.Cmd {
 	return func() tea.Msg {
 		if mcp.IsToolName(call.Function.Name) {
 			args := json.RawMessage(call.Function.Arguments)
@@ -154,7 +154,7 @@ func executeTool(workDir string, bash *agent.BashSession, mcpRegistry *mcp.Regis
 			}
 			return toolResultMsg{result: agent.ToolResult{ID: call.ID, Content: content, IsError: isError}}
 		}
-		return toolResultMsg{result: agent.Execute(context.Background(), workDir, call, bash)}
+		return toolResultMsg{result: agent.Execute(context.Background(), workDir, model, call, bash)}
 	}
 }
 

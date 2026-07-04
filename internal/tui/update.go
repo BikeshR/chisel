@@ -70,7 +70,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			call := m.pendingUses[0]
 			m.state = stateExecutingTool
 			m.appendLine(dimStyle.Render("  → approved"))
-			return m, executeTool(m.workDir, m.bash, m.mcp, call)
+			return m, executeTool(m.workDir, m.client.ModelName(), m.bash, m.mcp, call)
 		case "n", "N", "esc":
 			return m.handleToolResult(agent.ToolResult{
 				ID:      m.pendingUses[0].ID,
@@ -193,7 +193,7 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 
 	m.state = stateExecutingTool
 	m.appendLine(toolStyle.Render("  " + summarizeCall(call)))
-	return m, executeTool(m.workDir, m.bash, m.mcp, call)
+	return m, executeTool(m.workDir, m.client.ModelName(), m.bash, m.mcp, call)
 }
 
 func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {

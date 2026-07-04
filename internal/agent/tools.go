@@ -86,6 +86,12 @@ func Summarize(call ToolCall) string {
 		}
 		_ = json.Unmarshal(call.input(), &in)
 		return fmt.Sprintf("%s %s", in.Command, in.Path)
+	case "dispatch_subagent":
+		var in struct {
+			Task string `json:"task"`
+		}
+		_ = json.Unmarshal(call.input(), &in)
+		return "subagent: " + in.Task
 	default:
 		return call.Function.Name
 	}
@@ -95,7 +101,9 @@ func Summarize(call ToolCall) string {
 // operation — chisel never touches anything outside it. bash runs against
 // the given persistent session (nil is only valid if the call can't
 // possibly be "bash" — every real caller should pass a live session).
-func Execute(ctx context.Context, workDir string, call ToolCall, bash *BashSession) ToolResult {
+// model is only used by dispatch_subagent, to run the child with the same
+// model as the parent.
+func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *BashSession) ToolResult {
 	var content string
 	var err error
 
@@ -108,6 +116,10 @@ func Execute(ctx context.Context, workDir string, call ToolCall, bash *BashSessi
 		content, err = runGlob(workDir, call.input())
 	case "grep":
 		content, err = runGrep(workDir, call.input())
+	case "view":
+		content, err = runView(workDir, call.input())
+	case "dispatch_subagent":
+		content, err = runDispatchSubagent(ctx, workDir, model, call.input())
 	default:
 		err = fmt.Errorf("unknown tool %q", call.Function.Name)
 	}

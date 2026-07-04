@@ -127,3 +127,15 @@ any call that would otherwise need permission, before it ever reaches the
 y/n prompt or `agent.Execute`. Don't rely on the system-prompt instruction
 alone for anything safety-relevant — a model can ignore it; it can't
 bypass the dispatch-layer check.
+
+**A subagent is just a slower tool call, not a new TUI state.**
+`dispatch_subagent` (`subagent.go`) runs `RunSubagent`'s own small,
+synchronous send/execute loop entirely inside the single `tea.Cmd` that
+`executeTool` already returns for any tool — no new Bubbletea state was
+needed. Its safety property comes from the same trick plan mode uses for
+mutating calls, pushed one step further: rather than denying calls at
+dispatch time, `subagentTools()` is a tool list that's *incapable* of
+mutating anything — glob, grep, and `view` (a read-only-only variant of
+the editor tool, with no create/str_replace/insert command in the schema
+at all) — so a subagent needs no permission gate in the first place;
+there's nothing to gate.

@@ -13,6 +13,7 @@ package agent
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -83,7 +84,7 @@ func TestIntegrationToolCalling(t *testing.T) {
 		t.Fatalf("expected the glob tool, got %q", tc.Function.Name)
 	}
 
-	result := Execute(context.Background(), ".", tc, nil) // glob never touches the bash session
+	result := Execute(context.Background(), ".", "", tc, nil) // glob never touches the bash session or needs a model
 	if result.IsError {
 		t.Fatalf("tool execution failed: %s", result.Content)
 	}
@@ -101,5 +102,23 @@ func TestIntegrationToolCalling(t *testing.T) {
 	}
 	if final2.Message == nil || final2.Message.Content == "" {
 		t.Fatal("expected a non-empty follow-up response")
+	}
+}
+
+func TestIntegrationRunSubagent(t *testing.T) {
+	if os.Getenv("CHISEL_API_KEY") == "" {
+		t.Skip("CHISEL_API_KEY not set — skipping integration test")
+	}
+
+	summary, err := RunSubagent(context.Background(), ".", "minimax-m3",
+		"Find where the BashSession type is defined in this Go codebase and say which file it's in.")
+	if err != nil {
+		t.Fatalf("RunSubagent: %v", err)
+	}
+	if summary == "" {
+		t.Fatal("expected a non-empty summary")
+	}
+	if !strings.Contains(summary, "bashsession.go") {
+		t.Errorf("summary = %q, want it to correctly identify bashsession.go", summary)
 	}
 }
