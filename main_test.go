@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/BikeshR/chisel/internal/agent"
 )
 
 // unsetEnvForTest unsets key for the duration of the test, restoring
@@ -166,7 +169,7 @@ func TestRunHeadlessCoreReturnsFinalAnswer(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	answer, err := runHeadlessCore(t.TempDir(), "minimax-m3", "what is the answer?")
+	answer, _, err := runHeadlessCore(t.TempDir(), "minimax-m3", "what is the answer?")
 	if err != nil {
 		t.Fatalf("runHeadlessCore: %v", err)
 	}
@@ -202,7 +205,7 @@ func TestRunHeadlessCoreUsesReadOnlyTools(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	if _, err := runHeadlessCore(t.TempDir(), "minimax-m3", "hi"); err != nil {
+	if _, _, err := runHeadlessCore(t.TempDir(), "minimax-m3", "hi"); err != nil {
 		t.Fatalf("runHeadlessCore: %v", err)
 	}
 
@@ -233,7 +236,7 @@ func TestRunHeadlessCorePropagatesError(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	if _, err := runHeadlessCore(t.TempDir(), "minimax-m3", "hi"); err == nil {
+	if _, _, err := runHeadlessCore(t.TempDir(), "minimax-m3", "hi"); err == nil {
 		t.Error("expected an error from a failing request")
 	}
 }
@@ -335,5 +338,76 @@ func TestConfirmHooksAndPermRulesTrustAreIndependent(t *testing.T) {
 	}
 	if confirmPermRulesTrustFrom(workDir, strings.NewReader("n\n")) {
 		t.Error("trusting hooks.json must not implicitly trust permissions.json, even with identical content")
+	}
+}
+
+func TestFormatHeadlessJSONSuccess(t *testing.T) {
+	line, err := formatHeadlessJSON("the answer is 42", agent.Usage{InputTokens: 120, OutputTokens: 8}, nil)
+	if err != nil {
+		t.Fatalf("formatHeadlessJSON: %v", err)
+	}
+
+	var got struct {
+		Answer string `json:"answer"`
+		Usage  struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+		} `json:"usage"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(line), &got); err != nil {
+		t.Fatalf("output isn't valid JSON: %v — got %q", err, line)
+	}
+	if got.Answer != "the answer is 42" {
+		t.Errorf("Answer = %q", got.Answer)
+	}
+	if got.Usage.InputTokens != 120 || got.Usage.OutputTokens != 8 {
+		t.Errorf("Usage = %+v", got.Usage)
+	}
+	if got.Error != "" {
+		t.Errorf("Error = %q, want empty on success", got.Error)
+	}
+	if strings.Contains(line, `"error"`) {
+		t.Errorf("line = %q, want the omitempty error field entirely absent on success, not just empty", line)
+	}
+}
+
+func TestFormatHeadlessJSONFailure(t *testing.T) {
+	line, err := formatHeadlessJSON("", agent.Usage{}, fmt.Errorf("upstream returned 500"))
+	if err != nil {
+		t.Fatalf("formatHeadlessJSON: %v", err)
+	}
+
+	var got struct {
+		Answer string `json:"answer"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(line), &got); err != nil {
+		t.Fatalf("output isn't valid JSON: %v — got %q", err, line)
+	}
+	if got.Error != "upstream returned 500" {
+		t.Errorf("Error = %q", got.Error)
+	}
+	if got.Answer != "" {
+		t.Errorf("Answer = %q, want empty on failure", got.Answer)
+	}
+}
+
+func TestRunHeadlessCoreReturnsUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":55,\"completion_tokens\":11}}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	_, usage, err := runHeadlessCore(t.TempDir(), "minimax-m3", "hi")
+	if err != nil {
+		t.Fatalf("runHeadlessCore: %v", err)
+	}
+	if usage.InputTokens != 55 || usage.OutputTokens != 11 {
+		t.Errorf("usage = %+v, want {55 11}", usage)
 	}
 }

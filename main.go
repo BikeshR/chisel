@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -34,7 +35,8 @@ const defaultModel = "minimax-m3"
 func main() {
 	loadDotEnv()
 
-	prompt := flag.String("p", "", "run non-interactively: send this prompt, print the final answer, and exit — read-only tools only (no bash, no edits, no MCP), since there's no terminal here to show a permission prompt to")
+	prompt := flag.String("p", "", "run non-interactively: send this prompt, print the final answer, and exit — read-only tools only (no bash, no edits, no MCP), since there's no terminal here to show a permission prompt to. Put -p last (or use -p=\"...\"): being a string flag, it otherwise swallows the next flag as its own value")
+	jsonOutput := flag.Bool("json", false, "with -p, emit a single JSON object (answer, usage, error) to stdout instead of plain text — for scripts and CI")
 	flag.Parse()
 
 	// Checked here, not left to surface as the first request's raw 401 —
@@ -57,7 +59,7 @@ func main() {
 	}
 
 	if *prompt != "" {
-		runHeadless(workDir, model, *prompt)
+		runHeadless(workDir, model, *prompt, *jsonOutput)
 		return
 	}
 
@@ -127,12 +129,66 @@ func main() {
 // mode reuses that exact loop and the same read-only tool set.
 const maxHeadlessTurns = 15
 
+// headlessResult is chisel -p -json's entire stdout output — one JSON
+// object, printed whether the run succeeded or failed, so a script can
+// always parse stdout rather than needing to fall back to scraping
+// stderr text on failure. The exit code still reflects success/failure
+// (0 or 1); Error is just here to make that failure's reason
+// machine-readable too, not only human-readable on stderr.
+type headlessResult struct {
+	Answer string        `json:"answer,omitempty"`
+	Usage  headlessUsage `json:"usage"`
+	Error  string        `json:"error,omitempty"`
+}
+
+type headlessUsage struct {
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+}
+
+// formatHeadlessJSON builds headless mode's JSON stdout line from a
+// run's outcome — pulled out of runHeadless as its own pure function
+// so a test can check the exact JSON shape without needing to run
+// runHeadless as a subprocess just to observe what it prints before
+// calling os.Exit.
+func formatHeadlessJSON(answer string, usage agent.Usage, runErr error) (string, error) {
+	result := headlessResult{
+		Answer: answer,
+		Usage:  headlessUsage{InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens},
+	}
+	if runErr != nil {
+		result.Error = runErr.Error()
+	}
+	data, err := json.Marshal(result)
+	return string(data), err
+}
+
 // runHeadless is chisel -p: a non-interactive invocation for scripts
 // and CI. Prints the model's final answer to stdout and exits;
-// non-zero on any failure. Just a thin process-exiting wrapper around
-// runHeadlessCore, so a test can call that directly instead.
-func runHeadless(workDir, model, prompt string) {
-	answer, err := runHeadlessCore(workDir, model, prompt)
+// non-zero on any failure. With jsonOutput, prints one headlessResult
+// JSON object instead of plain text — see its own doc comment for why
+// that happens on failure too, not just success. Just a thin
+// process-exiting wrapper around runHeadlessCore, so a test can call
+// that directly instead.
+func runHeadless(workDir, model, prompt string, jsonOutput bool) {
+	answer, usage, err := runHeadlessCore(workDir, model, prompt)
+
+	if jsonOutput {
+		line, marshalErr := formatHeadlessJSON(answer, usage, err)
+		if marshalErr != nil {
+			// Content is plain strings and int64s — this should never
+			// actually fail, but silently printing nothing on stdout
+			// would be a worse failure mode than a clear stderr message.
+			fmt.Fprintln(os.Stderr, "chisel: marshal headless result:", marshalErr)
+			os.Exit(1)
+		}
+		fmt.Println(line)
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "chisel:", err)
 		os.Exit(1)
@@ -148,7 +204,7 @@ func runHeadless(workDir, model, prompt string) {
 // reused via the same agent.RunLoop. Hooks aren't loaded either — the
 // interactive trust prompt they'd otherwise need doesn't make sense in
 // a non-interactive invocation.
-func runHeadlessCore(workDir, model, prompt string) (string, error) {
+func runHeadlessCore(workDir, model, prompt string) (string, agent.Usage, error) {
 	client := agent.New(model)
 	client.SetTools(agent.ReadOnlyTools())
 
@@ -158,10 +214,9 @@ func runHeadlessCore(workDir, model, prompt string) (string, error) {
 
 	ctx := context.Background()
 	history := []agent.Message{{Role: "user", Content: prompt}}
-	answer, _, err := agent.RunLoop(ctx, client, history, maxHeadlessTurns, func(call agent.ToolCall) agent.ToolResult {
+	return agent.RunLoop(ctx, client, history, maxHeadlessTurns, func(call agent.ToolCall) agent.ToolResult {
 		return agent.Execute(ctx, workDir, model, call, nil, nil)
 	})
-	return answer, err
 }
 
 // agentToolsFromMCP converts MCP's own tool shape to agent.Tool — kept
