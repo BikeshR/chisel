@@ -29,4 +29,12 @@ var (
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderTop(true).
 			BorderForeground(lipgloss.AdaptiveColor{Light: "250", Dark: "237"})
+
+	// pickerSelectedStyle highlights the current row in the slash-command
+	// palette and the /model picker — same blue tone as userStyle, but
+	// as a background so a highlighted row reads clearly in both themes.
+	pickerSelectedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.AdaptiveColor{Light: "255", Dark: "255"}).
+				Background(lipgloss.AdaptiveColor{Light: "25", Dark: "63"}).
+				Bold(true)
 )

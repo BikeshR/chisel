@@ -50,7 +50,13 @@ func (m Model) View() string {
 		ta.SetHeight(inputHeight - 1)
 		b.WriteString(ta.View())
 	default:
-		if m.reverseSearchActive {
+		switch {
+		case m.modelPickerActive:
+			// Replaces the textarea outright, not padded to inputHeight —
+			// recomputeViewportHeight already accounted for its real
+			// (larger) height when the picker opened.
+			b.WriteString(m.renderModelPicker())
+		case m.reverseSearchActive:
 			// Padded with blank lines to the same inputHeight the normal
 			// textarea occupies, same reasoning as the busy-state spinner
 			// line above — otherwise the layout would shrink by
@@ -58,7 +64,11 @@ func (m Model) View() string {
 			// already reserved for it.
 			b.WriteString(m.reverseSearchLine())
 			b.WriteString(strings.Repeat("\n", inputHeight-1))
-		} else {
+		default:
+			if palette := m.renderCommandPalette(); palette != "" {
+				b.WriteString(palette)
+				b.WriteString("\n")
+			}
 			b.WriteString(m.textArea.View())
 		}
 	}

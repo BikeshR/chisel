@@ -242,9 +242,41 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.reverseSearchActive {
 			return m.handleReverseSearchKey(msg)
 		}
+		if m.modelPickerActive {
+			return m.handleModelPickerKey(msg)
+		}
 		if msg.Type == tea.KeyCtrlR {
 			m.startReverseSearch()
 			return m, nil
+		}
+		// Command palette: a live dropdown of "/"-command names matching
+		// what's being typed (see refreshCommandPalette, called below
+		// wherever the textarea's content can change). While it's
+		// showing, up/down browse it instead of history recall, esc
+		// dismisses it, and tab/enter act on the highlighted candidate
+		// rather than the raw textarea content — enter fills it in and
+		// submits immediately, tab just fills it in so args can follow.
+		if len(m.commandPaletteCandidates) > 0 {
+			switch msg.Type {
+			case tea.KeyUp:
+				m.movePaletteSelection(-1)
+				return m, nil
+			case tea.KeyDown:
+				m.movePaletteSelection(1)
+				return m, nil
+			case tea.KeyEsc:
+				m.commandPaletteCandidates = nil
+				m.recomputeViewportHeight()
+				return m, nil
+			case tea.KeyTab:
+				m.acceptPaletteCandidate()
+				return m, nil
+			case tea.KeyEnter:
+				if !msg.Alt {
+					m.acceptPaletteCandidate()
+					return m.submit()
+				}
+			}
 		}
 		// Plain enter submits; alt+enter (textArea's rebound
 		// InsertNewline — see New) falls through instead, so it never
@@ -253,15 +285,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.submit()
 		}
 		if msg.Type == tea.KeyTab {
-			// A slash command is only ever the first (and, while still
-			// being typed, only) token — once a space follows it, tab
-			// completion is back to @-file references, same as anywhere
-			// else in the message.
-			if value := strings.TrimRight(m.textArea.Value(), "\n"); strings.HasPrefix(value, "/") && !strings.ContainsAny(value, " \t\n") {
-				m.completeCommandInInput()
-			} else {
-				m.completeFileReferenceInInput()
-			}
+			m.completeFileReferenceInInput()
 			return m, nil
 		}
 		// Only take over up/down for history recall when the textarea is
@@ -273,6 +297,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.textArea, cmd = m.textArea.Update(msg)
+		m.refreshCommandPalette()
 		return m, cmd
 
 	case stateWaitingModel, stateExecutingTool:

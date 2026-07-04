@@ -16,17 +16,19 @@ import (
 )
 
 // builtinCommandNames mirrors handleCommand's own switch — kept in sync
-// with it the same way helpText already has to be — for tab completion
-// (see commandNames/completeCommandInInput).
+// with it the same way helpText already has to be — for the live
+// command-palette dropdown (see commandNames, refreshCommandPalette in
+// picker.go).
 var builtinCommandNames = []string{
 	"/help", "/model", "/think", "/new", "/compact", "/retry",
 	"/git", "/plan", "/status", "/usage", "/rewind", "/queue",
 	"/sessions", "/resume",
 }
 
-// commandNames returns every "/"-command name available for tab
-// completion: the fixed built-ins above plus any user-defined custom
-// commands loaded at startup (~/.chisel/commands, <workDir>/.chisel/commands).
+// commandNames returns every "/"-command name available for the
+// command palette: the fixed built-ins above plus any user-defined
+// custom commands loaded at startup (~/.chisel/commands,
+// <workDir>/.chisel/commands).
 func (m Model) commandNames() []string {
 	names := append([]string{}, builtinCommandNames...)
 	for _, name := range customcmd.Names(m.customCommands) {
@@ -34,35 +36,6 @@ func (m Model) commandNames() []string {
 	}
 	sort.Strings(names)
 	return names
-}
-
-// completeCommandInInput tab-completes a "/"-command name being typed —
-// same longest-common-prefix behavior as @-file completion (fileref.go):
-// a single match completes fully, plus a trailing space so the cursor
-// lands ready for arguments; several matches complete only as far as
-// they all agree and get listed in the transcript so an ambiguous
-// completion isn't a silent no-op.
-func (m *Model) completeCommandInInput() {
-	value := strings.TrimRight(m.textArea.Value(), "\n")
-	var matches []string
-	for _, name := range m.commandNames() {
-		if strings.HasPrefix(name, value) {
-			matches = append(matches, name)
-		}
-	}
-	if len(matches) == 0 {
-		return
-	}
-	if len(matches) == 1 {
-		m.textArea.SetValue(matches[0] + " ")
-		m.textArea.CursorEnd()
-		return
-	}
-	if completed := longestCommonPrefix(matches); completed != value {
-		m.textArea.SetValue(completed)
-		m.textArea.CursorEnd()
-	}
-	m.appendLine(dimStyle.Render("  " + strings.Join(capCandidates(matches, maxCompletionCandidatesShown), "  ")))
 }
 
 // handleCommand processes a "/"-prefixed line from the input box instead of
@@ -131,7 +104,7 @@ func (m Model) handleCustomOrUnknownCommand(text string, fields []string) (Model
 // dispatches — keep the two in sync when adding or changing a command.
 const helpText = `commands:
   /help                 show this list
-  /model [name]         show available models, or switch to name
+  /model [name]         switch to name, or open an interactive picker if no name is given
   /model check [name]   test a model through chisel's real request shape
   /think                toggle showing <think> blocks in full
   /new                  start a fresh session (previous one stays saved — /sessions, /resume)
@@ -150,7 +123,7 @@ keys:
   enter                 submit · in a permission prompt, only y/Y approves · while busy, queues instead
   alt+enter             insert a newline while composing a message
   @path                 reference a file — its content is sent to the model, tab to complete
-  /command              tab-completes too — ambiguous prefixes list candidates
+  /command              shows a live dropdown of matching commands as you type — ↑/↓ to browse, tab fills it in, enter runs it
   !command              run a shell command directly, bypassing the model entirely — no permission prompt
   up / down             recall previous input (single-line only, persists across restarts)
   ctrl+r                incremental reverse search through input history
@@ -417,16 +390,19 @@ func (m Model) handleGitCommand(args []string) Model {
 
 func (m Model) handleModelCommand(args []string) (Model, tea.Cmd) {
 	if len(args) == 0 {
-		current := m.client.ModelName()
-		m.appendLine(dimStyle.Render("available models (current marked ›):"))
-		for _, name := range agent.KnownModels() {
-			marker := "    "
-			if name == current {
-				marker = "  › "
+		// An interactive picker instead of a static list the user then
+		// had to retype a name from — see modelPickerActive,
+		// handleModelPickerKey (picker.go). Pre-selects the current
+		// model rather than always starting at the top of the list.
+		m.modelPickerActive = true
+		m.modelPickerSelected = 0
+		for i, name := range agent.KnownModels() {
+			if name == m.client.ModelName() {
+				m.modelPickerSelected = i
+				break
 			}
-			m.appendLine(dimStyle.Render(marker + name))
 		}
-		m.appendLine(dimStyle.Render("  usage: /model <name>  ·  /model check [name]"))
+		m.recomputeViewportHeight()
 		return m, nil
 	}
 

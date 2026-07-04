@@ -143,6 +143,30 @@ type Model struct {
 	reverseSearchQuery    string
 	reverseSearchMatchIdx int
 
+	// commandPaletteCandidates is the live-filtered list of "/"-command
+	// names matching whatever's currently being typed — see
+	// refreshCommandPalette, called after every keystroke that could
+	// have changed the textarea while composing a bare slash command
+	// (the same "first token, no space yet" condition tab-completion
+	// already used). Its presence (non-nil) is what View checks to
+	// decide whether to render the dropdown at all, and what handleKey
+	// checks to steer up/down/tab/enter at the palette instead of their
+	// usual meaning (history recall, file-ref completion, submit).
+	// commandPaletteSelected indexes into it for the highlighted row.
+	commandPaletteCandidates []string
+	commandPaletteSelected   int
+
+	// modelPickerActive is set when a bare "/model" (no further args) is
+	// submitted — an interactive alternative to just printing every
+	// known model as static text, letting the user arrow to one and
+	// press enter to switch immediately rather than retyping its exact
+	// name as a separate command. A sub-mode of stateInput, the same
+	// pattern reverseSearchActive already uses, since nothing async is
+	// happening — it's purely how the input area is being used right
+	// now. modelPickerSelected indexes into agent.KnownModels().
+	modelPickerActive   bool
+	modelPickerSelected int
+
 	// todos is the model's current task checklist, replaced wholesale
 	// on every successful update_todos call (see parseTodos in todo.go)
 	// — rendered as a persistent block in View, not appended to the
@@ -511,16 +535,28 @@ func (m *Model) refreshAndMaybeStickToBottom() {
 
 // recomputeViewportHeight sets the transcript viewport's height from
 // the current terminal size, minus the fixed input-box-and-status-bar
-// margin and however many lines the todo block currently needs — unlike
-// the input box, the todo block's height isn't fixed, so this has to be
-// redone whenever the todo list changes, not just on resize. Measures the
-// todo block's actual wrapped line count rather than assuming one row per
-// item — a long item wraps to more than one terminal row at m.width, and
+// margin and however many lines the todo block, the command palette
+// dropdown, or the model picker currently need — unlike the input box,
+// none of those have a fixed height, so this has to be redone whenever
+// any of them change, not just on resize. Measures the todo block's
+// actual wrapped line count rather than assuming one row per item — a
+// long item wraps to more than one terminal row at m.width, and
 // undercounting it here pushes the input box/status bar off-screen.
 func (m *Model) recomputeViewportHeight() {
 	extra := inputHeight + 3 // input box + status bar + margin
 	if todos := wrapToWidth(renderTodos(m.todos), m.width); todos != "" {
 		extra += strings.Count(todos, "\n") + 2 // the todo block itself, plus the blank line separating it from the transcript
+	}
+	switch {
+	case m.modelPickerActive:
+		// Replaces the fixed-height textarea outright with a list as
+		// tall as agent.KnownModels() plus its own header line, rather
+		// than sitting on top of it the way the todo block and the
+		// command palette do — subtract inputHeight back out first.
+		extra -= inputHeight
+		extra += len(agent.KnownModels()) + 1
+	case len(m.commandPaletteCandidates) > 0:
+		extra += len(m.commandPaletteCandidates) + 1 // the dropdown itself, plus the blank line separating it from the textarea
 	}
 	m.viewport.Height = m.height - extra
 }
