@@ -14,6 +14,7 @@ import (
 	"github.com/BikeshR/chisel/internal/agent"
 	"github.com/BikeshR/chisel/internal/hooks"
 	"github.com/BikeshR/chisel/internal/mcp"
+	"github.com/BikeshR/chisel/internal/memory"
 	"github.com/BikeshR/chisel/internal/session"
 	"github.com/BikeshR/chisel/internal/tui"
 )
@@ -52,8 +53,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "chisel: hooks:", err)
 	}
 
+	memContent, memUser, memProject := memory.Load(workDir)
+	if memContent != "" {
+		client.SetMemory(memContent)
+	}
+
 	resumed, savedAt, _ := session.Load(workDir)
-	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, resumed, savedAt)
+	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, memUser, memProject, resumed, savedAt)
 
 	if _, err := tea.NewProgram(tuiModel, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "chisel:", err)

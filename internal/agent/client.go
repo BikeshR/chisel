@@ -45,6 +45,7 @@ type Client struct {
 	model    string
 	tools    []Tool
 	planMode bool
+	memory   string
 }
 
 // New builds a Client for the given model. Configured via CHISEL_API_KEY
@@ -87,6 +88,13 @@ func (c *Client) PlanMode() bool {
 	return c.planMode
 }
 
+// SetMemory sets the CHISEL.md content (see internal/memory) appended to
+// the system prompt sent with every request from here on. Pass "" to
+// clear it.
+func (c *Client) SetMemory(text string) {
+	c.memory = text
+}
+
 type chatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
@@ -103,6 +111,9 @@ func (c *Client) SendStreaming(ctx context.Context, history []Message) (<-chan E
 	prompt := systemPrompt
 	if c.planMode {
 		prompt += planModeNote
+	}
+	if c.memory != "" {
+		prompt += "\n\n---\n\nProject and user instructions:\n\n" + c.memory
 	}
 	messages := append([]Message{{Role: "system", Content: prompt}}, history...)
 

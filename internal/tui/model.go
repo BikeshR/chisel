@@ -73,8 +73,10 @@ type Model struct {
 // exit) doesn't depend on anything inside this package. resumed and
 // savedAt come from session.Load — pass a nil/zero pair if there's
 // nothing to resume. hooksCfg comes from hooks.LoadConfig — a zero value
-// is fine and just means no hooks configured.
-func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, resumed []agent.Message, savedAt time.Time) Model {
+// is fine and just means no hooks configured. memUser/memProject report
+// which CHISEL.md files memory.Load found, just to show a startup line —
+// the content itself was already handed to the client via SetMemory.
+func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, resumed []agent.Message, savedAt time.Time) Model {
 	ti := textinput.New()
 	ti.Placeholder = "ask chisel to do something…"
 	ti.Focus()
@@ -96,14 +98,32 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 		streamLineIdx: -1,
 	}
 
+	if memUser || memProject {
+		m.lines = append(m.lines, dimStyle.Render("loaded "+memoryBannerText(memUser, memProject)))
+	}
+
 	if len(resumed) > 0 {
 		m.lines = append(m.lines, resumeBanner(len(resumed), savedAt))
 		m.lines = append(m.lines, renderHistory(resumed, m.showThinking)...)
+	}
+
+	if len(m.lines) > 0 {
 		m.viewport.SetContent(joinLines(m.lines))
 		m.viewport.GotoBottom()
 	}
 
 	return m
+}
+
+func memoryBannerText(memUser, memProject bool) string {
+	switch {
+	case memUser && memProject:
+		return "CHISEL.md (user + project)"
+	case memProject:
+		return "CHISEL.md (project)"
+	default:
+		return "CHISEL.md (user)"
+	}
 }
 
 func (m Model) Init() tea.Cmd {

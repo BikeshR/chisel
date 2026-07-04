@@ -21,6 +21,10 @@ Conversations save automatically per working directory
 (`~/.chisel/sessions/`) and resume the next time you run chisel there;
 `/new` starts a fresh one.
 
+Drop project instructions in a `CHISEL.md` in your project root (loaded
+into the system prompt), or `~/.chisel/CHISEL.md` for preferences that
+apply everywhere — the same convention as `CLAUDE.md`/`AGENTS.md`.
+
 File edits show a diff before you approve them. `/git auto on` (off by
 default) makes chisel commit its own changes after each turn, Aider-style.
 
