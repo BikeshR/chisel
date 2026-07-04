@@ -1,0 +1,141 @@
+package tui
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/BikeshR/chisel/internal/agent"
+)
+
+func TestEnterWhileBusyQueuesInsteadOfSwallowing(t *testing.T) {
+	m := newInputModel()
+	m.state = stateWaitingModel
+	m.textArea.SetValue("what about this too")
+
+	gotTeaModel, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("expected a nil Cmd — queueing doesn't start a new request")
+	}
+	got := gotTeaModel.(Model)
+	if len(got.queuedMessages) != 1 || got.queuedMessages[0] != "what about this too" {
+		t.Errorf("queuedMessages = %+v, want the typed text queued", got.queuedMessages)
+	}
+	if got.state != stateWaitingModel {
+		t.Errorf("state = %v, want unchanged", got.state)
+	}
+	if got.textArea.Value() != "" {
+		t.Error("textArea should be cleared after queueing")
+	}
+}
+
+func TestTypingWhileBusyStillEditsTheTextarea(t *testing.T) {
+	m := newInputModel()
+	m.state = stateExecutingTool
+
+	gotTeaModel, _ := m.handleKey(tea.KeyMsg{Runes: []rune("x"), Type: tea.KeyRunes})
+	got := gotTeaModel.(Model)
+	if got.textArea.Value() != "x" {
+		t.Errorf("textArea value = %q, want %q — typing while busy should still reach the textarea", got.textArea.Value(), "x")
+	}
+}
+
+func TestEmptyEnterWhileBusyQueuesNothing(t *testing.T) {
+	m := newInputModel()
+	m.state = stateWaitingModel
+
+	gotTeaModel, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	got := gotTeaModel.(Model)
+	if len(got.queuedMessages) != 0 {
+		t.Errorf("queuedMessages = %+v, want empty for a blank submission", got.queuedMessages)
+	}
+}
+
+func TestDequeueOrSubmitDeliversNextQueuedMessage(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3"), queuedMessages: []string{"first", "second"}}
+
+	cmd := m.dequeueOrSubmit()
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd to start the queued message's request")
+	}
+	if len(m.queuedMessages) != 1 || m.queuedMessages[0] != "second" {
+		t.Errorf("queuedMessages = %+v, want only \"second\" left", m.queuedMessages)
+	}
+	if len(m.messages) != 1 || m.messages[0].Content != "first" {
+		t.Errorf("messages = %+v, want the first queued message sent", m.messages)
+	}
+	if m.state != stateWaitingModel {
+		t.Errorf("state = %v, want stateWaitingModel", m.state)
+	}
+}
+
+func TestDequeueOrSubmitNilWhenNothingQueued(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3")}
+	if cmd := m.dequeueOrSubmit(); cmd != nil {
+		t.Error("expected a nil Cmd when nothing is queued")
+	}
+}
+
+// TestQueuedMessageDeliveredWhenTurnCompletes is an end-to-end check
+// through handleStreamComplete: a message queued while busy must
+// actually get sent once the in-flight turn finishes, not just sit in
+// the queue forever.
+func TestQueuedMessageDeliveredWhenTurnCompletes(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3"), queuedMessages: []string{"queued one"}}
+
+	got, cmd := m.handleStreamComplete(agent.Message{Role: "assistant", Content: "done"}, agent.Usage{}, "stop")
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd — the queued message should be sent")
+	}
+	gotModel := got.(Model)
+	if len(gotModel.queuedMessages) != 0 {
+		t.Errorf("queuedMessages = %+v, want empty after delivery", gotModel.queuedMessages)
+	}
+	found := false
+	for _, msg := range gotModel.messages {
+		if msg.Role == "user" && msg.Content == "queued one" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("messages = %+v, want the queued message appended", gotModel.messages)
+	}
+	if gotModel.state != stateWaitingModel {
+		t.Errorf("state = %v, want stateWaitingModel — chisel should be busy again with the queued message", gotModel.state)
+	}
+}
+
+func TestStatusLineShowsQueuedCount(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3"), queuedMessages: []string{"a", "b"}}
+	if !strings.Contains(m.statusLine(), "2 queued") {
+		t.Errorf("statusLine() = %q, want it to mention 2 queued messages", m.statusLine())
+	}
+}
+
+// TestQueuedMessageDeliveredAfterInterrupt confirms a message queued
+// while busy still gets delivered even if the turn it was queued during
+// ends via interruption (esc) rather than completing normally — esc
+// aborts the current response, not the user's other typed plans.
+func TestQueuedMessageDeliveredAfterInterrupt(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3"), queuedMessages: []string{"send me next"}}
+
+	got, cmd := m.handleStreamEvent(streamEventMsg{event: agent.Event{Done: true, Err: context.Canceled}})
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd — the queued message should be sent even after an interrupt")
+	}
+	gotModel := got.(Model)
+	if len(gotModel.queuedMessages) != 0 {
+		t.Errorf("queuedMessages = %+v, want delivered", gotModel.queuedMessages)
+	}
+	found := false
+	for _, msg := range gotModel.messages {
+		if msg.Content == "send me next" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected the queued message to have been sent after the interrupt resolved")
+	}
+}

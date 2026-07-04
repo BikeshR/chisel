@@ -147,16 +147,33 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case stateWaitingModel, stateExecutingTool:
-		// Busy: every other keystroke is ignored, but esc aborts whatever
-		// is running — an in-flight model request or tool call — via the
-		// context newTurnContext stashed when it started. The operation's
-		// own error path (handleStreamEvent, handleToolResult via
+		// Busy, but not deaf: esc aborts whatever is running — an
+		// in-flight model request or tool call — via the context
+		// newTurnContext stashed when it started. The operation's own
+		// error path (handleStreamEvent, handleToolResult via
 		// executeTool's result) picks up from there and returns to
 		// stateInput; esc itself doesn't touch state.
 		if msg.Type == tea.KeyEsc && m.cancelTurn != nil {
 			m.cancelTurn()
+			return m, nil
 		}
-		return m, nil
+		// Enter here doesn't submit (there's no turn to submit into
+		// yet) — it queues instead, delivered in order by
+		// dequeueOrSubmit once chisel is next free to send something,
+		// rather than being swallowed the way every keystroke while
+		// busy used to be.
+		if msg.Type == tea.KeyEnter && !msg.Alt {
+			text := strings.TrimSuffix(m.textArea.Value(), "\n")
+			m.textArea.Reset()
+			if text != "" {
+				m.queuedMessages = append(m.queuedMessages, text)
+				m.appendLine(dimStyle.Render("  → queued: " + firstLine(text)))
+			}
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.textArea, cmd = m.textArea.Update(msg)
+		return m, cmd
 
 	default:
 		return m, nil
@@ -225,6 +242,14 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, textarea.Blink)
 	}
 
+	m, cmd := m.submitText(text)
+	return m, tea.Batch(cmd, textarea.Blink)
+}
+
+// submitText sends text as a new user message and starts the model's
+// response — the shared core of a normal submit() and of delivering a
+// message that was queued while busy (see dequeueOrSubmit).
+func (m Model) submitText(text string) (Model, tea.Cmd) {
 	if m.autoCommit {
 		// Snapshot before this turn's actions, not just before this
 		// message — so /git auto's eventual commit can be scoped to
@@ -242,7 +267,24 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.state = stateWaitingModel
 
 	ctx := m.newTurnContext()
-	return m, tea.Batch(startStream(ctx, m.client, m.messages), saveSession(m.workDir, m.messages), textarea.Blink)
+	return m, tea.Batch(startStream(ctx, m.client, m.messages), saveSession(m.workDir, m.messages))
+}
+
+// dequeueOrSubmit delivers the next message queued while chisel was
+// busy (see the stateWaitingModel/stateExecutingTool case in handleKey),
+// if any — call after any transition back to stateInput, batched
+// alongside whatever else that transition already needed to do (saving
+// the session, notifying), so a message typed while busy isn't silently
+// swallowed once the wait is finally over. Returns nil if nothing is queued.
+func (m *Model) dequeueOrSubmit() tea.Cmd {
+	if len(m.queuedMessages) == 0 {
+		return nil
+	}
+	next := m.queuedMessages[0]
+	m.queuedMessages = m.queuedMessages[1:]
+	updated, cmd := m.submitText(next)
+	*m = updated
+	return cmd
 }
 
 // handleStreamEvent processes one event from the in-flight response. While
@@ -265,6 +307,9 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		m.endStreamLine()
 		m.appendLine(errorStyle.Render("error  " + interruptibleErrorText(ev.Err)))
 		m.state = stateInput
+		if queued := m.dequeueOrSubmit(); queued != nil {
+			return m, queued
+		}
 		// No notification for a cancellation — esc means the user is
 		// already at the keyboard, mid-keypress; a genuine error while
 		// they may have stepped away is the case worth surfacing.
@@ -300,11 +345,21 @@ func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage, finis
 		m.endTurn()
 		m.state = stateInput
 		save := saveSession(m.workDir, m.messages)
-		notify := notifyIdle("chisel is done")
-		if m.autoCommit {
-			return m, tea.Batch(save, notify, autoCommit(m.workDir, m.preTurnDirty, lastUserText(m.messages)))
+
+		// A queued message delivered here means chisel is about to be
+		// busy again right away — skip the "chisel is done" notification
+		// in that case, the user's already at the keyboard (that's how
+		// the message got queued in the first place).
+		queued := m.dequeueOrSubmit()
+		var notify tea.Cmd
+		if queued == nil {
+			notify = notifyIdle("chisel is done")
 		}
-		return m, tea.Batch(save, notify)
+
+		if m.autoCommit {
+			return m, tea.Batch(save, notify, queued, autoCommit(m.workDir, m.preTurnDirty, lastUserText(m.messages)))
+		}
+		return m, tea.Batch(save, notify, queued)
 	}
 
 	// Deliberately not saving here: resp (just appended above) carries
@@ -326,7 +381,7 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	if len(m.pendingUses) == 0 {
 		m.endTurn()
 		m.state = stateInput
-		return m, nil
+		return m, m.dequeueOrSubmit()
 	}
 	call := m.pendingUses[0]
 

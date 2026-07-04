@@ -78,6 +78,12 @@ type Model struct {
 	// see syncMCPHealth — so a server that was already handled once
 	// doesn't get re-announced (or re-attempt tool removal) every turn.
 	knownBrokenMCP map[string]bool
+	// queuedMessages holds text submitted (enter) while busy
+	// (stateWaitingModel/stateExecutingTool) — delivered in order, one
+	// at a time, by dequeueOrSubmit whenever chisel next returns to
+	// stateInput, instead of being swallowed the way every keystroke
+	// while busy used to be.
+	queuedMessages []string
 
 	// streamLineIdx is the index into entries of the assistant line
 	// currently being built from streamed text deltas, or -1 if none is

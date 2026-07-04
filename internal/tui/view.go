@@ -50,8 +50,13 @@ func (m Model) statusLine() string {
 		mcpWarning = errorStyle.Render(fmt.Sprintf("%d mcp broken", broken)) + " · "
 	}
 
-	return fmt.Sprintf(" %s%s%s · context %s · spent %s in / %s out · ctrl+c to quit",
-		plan, mcpWarning, m.client.ModelName(), context, formatTokenCount(m.tokensIn), formatTokenCount(m.tokensOut))
+	queued := ""
+	if n := len(m.queuedMessages); n > 0 {
+		queued = dimStyle.Render(fmt.Sprintf("%d queued", n)) + " · "
+	}
+
+	return fmt.Sprintf(" %s%s%s%s · context %s · spent %s in / %s out · ctrl+c to quit",
+		plan, mcpWarning, queued, m.client.ModelName(), context, formatTokenCount(m.tokensIn), formatTokenCount(m.tokensOut))
 }
 
 // brokenMCPCount counts how many of statuses are currently broken —
