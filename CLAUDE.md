@@ -6,11 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 chisel is a personal terminal coding agent: a Bubbletea TUI wrapped around
 OpenCode Go's OpenAI-compatible chat-completions API, with a small fixed
-tool set (`bash`, file editing, `glob`, `grep`). Single provider, no SDK
-dependency — chisel owns its own HTTP client and SSE decoder. See
-`docs/design.md` for the full architecture rationale and roadmap,
-including *why* it ended up single-provider and SDK-free (it didn't start
-that way).
+tool set (`bash`, file editing, `glob`, `grep`), extensible with MCP
+servers (`internal/mcp`). Single provider, no SDK dependency — chisel owns
+its own HTTP client and SSE decoder. See `docs/design.md` for the full
+architecture rationale and roadmap, including *why* it ended up
+single-provider and SDK-free (it didn't start that way).
 
 ## Commands
 
@@ -81,7 +81,24 @@ directly.
 confirmation; `str_replace_based_edit_tool` needs it unless the parsed
 `command` field is `"view"`; everything else (`glob`, `grep`) is
 auto-allowed. It inspects the tool call's arguments directly, not the
-result of running it.
+result of running it. `internal/tui/model.go`'s `needsPermission` wraps
+this with one more rule before delegating: any `mcp__`-prefixed call
+always needs permission, since chisel has no way to know what an
+arbitrary MCP server's tool actually does — that rule lives in `tui`, not
+`agent` (see below for why).
+
+**`internal/mcp` doesn't import `internal/agent`, on purpose.** It would
+be the natural place to return `[]agent.Tool` directly from
+`Registry.Tools()`, but `agent.Execute` routing calls to MCP servers
+would then need to import `mcp` back — a cycle. Instead `mcp` defines its
+own `Tool` type and stays a standalone protocol client; `main.go` converts
+`mcp.Tool` → `agent.Tool` once, and `tui/model.go`'s `executeTool` checks
+`mcp.IsToolName` to route a call to `mcp.Registry.Call` instead of
+`agent.Execute`. The practical effect: MCP-specific behavior (the
+always-permission rule above, the `mcp__server__tool` → `"server: tool"`
+prompt rendering in `summarizeCall`) lives in `tui`, not `agent` — if
+you're about to add an MCP special-case inside `agent`, it likely belongs
+in `tui` instead.
 
 **Model-specific quirks get handled at the render layer, not the decode
 layer.** `decodeStream` accumulates exactly what the model sends, verbatim.

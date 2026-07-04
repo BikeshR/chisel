@@ -224,7 +224,11 @@ Four phases, each a genuinely usable tool in its own right.
 
 ### Phase 3 — Real capability
 
-- MCP client support — the highest-leverage single addition (see §3)
+- ~~MCP client support~~ — **done**: `internal/mcp` is a stdio-transport client — spawns each configured server, does the `initialize`/`notifications/initialized` handshake, and calls `tools/list` — for servers listed in `~/.chisel/mcp.json` (same `mcpServers` shape as Claude Desktop/Claude Code, so an existing config works unchanged). A server that fails to start isn't fatal to chisel as a whole; `LoadAndStartAll` returns whatever did start alongside the errors for the rest, logged to stderr.
+
+  Tools are namespaced `mcp__<server>__<tool>` (`Registry.Tools`/`Registry.Call`) so two servers, or a server and chisel's own fixed tools, can't collide. `internal/mcp` deliberately doesn't import `internal/agent` — it stays a standalone protocol client with its own `Tool` type; converting to `agent.Tool` happens once, in `main.go`, to avoid a would-be import cycle (`agent.Execute` routing MCP calls would need `mcp`, and `mcp.Tools()` returning `agent.Tool` would need `agent`). For the same reason, `agent.NeedsPermission`/`agent.Summarize` don't know about MCP at all — chisel always requires permission for any `mcp__`-prefixed call (it can't know what an arbitrary server's tool does, so none of the built-in read-only auto-allow heuristics apply) and prettifies the prompt into "server: tool", both living in `internal/tui` (`needsPermission`/`summarizeCall` in `model.go`) as a thin layer on top of the `agent` functions, not a change to them.
+
+  A hung `tools/call` is bounded by the same defensive pattern as the persistent bash session: a timeout marks the connection broken, and every further call to that server fails fast with a "restart chisel to reconnect" message rather than risking a read desynced from a still-pending request — there's no automatic reconnect in this version. Tested with a real subprocess throughout (`internal/mcp/server_test.go` re-execs the test binary itself as a minimal fake MCP server, the standard Go pattern for testing exec-based clients), not mocked at the transport layer.
 - Context management: manual context editing/summarization as the window fills (no server-side compaction to lean on now — that was an Anthropic API feature)
 - Plan mode — a read-only planning turn, presented for confirmation before execution begins
 - Subagents — spawn a child instance of the same loop with a narrower tool set for a delegated subtask

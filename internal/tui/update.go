@@ -67,7 +67,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			call := m.pendingUses[0]
 			m.state = stateExecutingTool
 			m.appendLine(dimStyle.Render("  → approved"))
-			return m, executeTool(m.workDir, m.bash, call)
+			return m, executeTool(m.workDir, m.bash, m.mcp, call)
 		case "n", "N", "esc":
 			return m.handleToolResult(agent.ToolResult{
 				ID:      m.pendingUses[0].ID,
@@ -163,19 +163,19 @@ func (m Model) handleStreamComplete(resp agent.Message, finishReason string, usa
 func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	call := m.pendingUses[0]
 
-	if agent.NeedsPermission(call) {
+	if needsPermission(call) {
 		m.state = stateAwaitingPermission
-		prompt := fmt.Sprintf("allow %s?  [y/n]", agent.Summarize(call))
+		prompt := fmt.Sprintf("allow %s?  [y/n]", summarizeCall(call))
 		if diff, ok := agent.PreviewEdit(m.workDir, call); ok {
-			prompt = fmt.Sprintf("allow %s?\n\n%s\n[y/n]", agent.Summarize(call), strings.TrimRight(diff, "\n"))
+			prompt = fmt.Sprintf("allow %s?\n\n%s\n[y/n]", summarizeCall(call), strings.TrimRight(diff, "\n"))
 		}
 		m.appendLine(permissionStyle.Render(prompt))
 		return m, nil
 	}
 
 	m.state = stateExecutingTool
-	m.appendLine(toolStyle.Render("  " + agent.Summarize(call)))
-	return m, executeTool(m.workDir, m.bash, call)
+	m.appendLine(toolStyle.Render("  " + summarizeCall(call)))
+	return m, executeTool(m.workDir, m.bash, m.mcp, call)
 }
 
 func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {

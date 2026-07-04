@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/mcp"
 	"github.com/BikeshR/chisel/internal/session"
 	"github.com/BikeshR/chisel/internal/tui"
 )
@@ -38,13 +39,38 @@ func main() {
 	bash := agent.NewBashSession(workDir)
 	defer bash.Close()
 
+	mcpRegistry, mcpErrs := mcp.LoadAndStartAll()
+	defer mcpRegistry.Close()
+	for _, e := range mcpErrs {
+		fmt.Fprintln(os.Stderr, "chisel: mcp:", e)
+	}
+	client.AddTools(agentToolsFromMCP(mcpRegistry.Tools()))
+
 	resumed, savedAt, _ := session.Load(workDir)
-	tuiModel := tui.New(client, workDir, bash, resumed, savedAt)
+	tuiModel := tui.New(client, workDir, bash, mcpRegistry, resumed, savedAt)
 
 	if _, err := tea.NewProgram(tuiModel, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "chisel:", err)
 		os.Exit(1)
 	}
+}
+
+// agentToolsFromMCP converts MCP's own tool shape to agent.Tool — kept
+// here rather than in internal/mcp so that package stays a standalone
+// protocol client with no dependency on chisel's own wire-format types.
+func agentToolsFromMCP(tools []mcp.Tool) []agent.Tool {
+	out := make([]agent.Tool, len(tools))
+	for i, t := range tools {
+		out[i] = agent.Tool{
+			Type: "function",
+			Function: agent.ToolFunction{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  t.InputSchema,
+			},
+		}
+	}
+	return out
 }
 
 // loadDotEnv sets environment variables from ~/.chisel.env if the file

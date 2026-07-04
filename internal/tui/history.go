@@ -24,7 +24,7 @@ func renderHistory(messages []agent.Message, showThinking bool) []string {
 				lines = append(lines, assistantStyle.Render("chisel  ")+renderAssistantText(msg.Content, showThinking))
 			}
 			for _, call := range msg.ToolCalls {
-				lines = append(lines, toolStyle.Render("  "+agent.Summarize(call)))
+				lines = append(lines, toolStyle.Render("  "+summarizeCall(call)))
 			}
 
 		case "tool":

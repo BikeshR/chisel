@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/BikeshR/chisel/internal/agent"
 	"github.com/BikeshR/chisel/internal/gitutil"
+	"github.com/BikeshR/chisel/internal/mcp"
 	"github.com/BikeshR/chisel/internal/session"
 )
 
@@ -31,6 +34,7 @@ type Model struct {
 	client  *agent.Client
 	workDir string
 	bash    *agent.BashSession
+	mcp     *mcp.Registry
 
 	messages []agent.Message
 	lines    []string // rendered transcript, newest last
@@ -57,11 +61,12 @@ type Model struct {
 }
 
 // New builds the initial Model for a chisel session rooted at workDir.
-// bash is owned by the caller (main.go), not created here, so its
-// lifecycle (in particular, closing the underlying shell on exit) doesn't
-// depend on anything inside this package. resumed and savedAt come from
-// session.Load — pass a nil/zero pair if there's nothing to resume.
-func New(client *agent.Client, workDir string, bash *agent.BashSession, resumed []agent.Message, savedAt time.Time) Model {
+// bash and mcpRegistry are owned by the caller (main.go), not created
+// here, so their lifecycle (closing the shell / MCP server processes on
+// exit) doesn't depend on anything inside this package. resumed and
+// savedAt come from session.Load — pass a nil/zero pair if there's
+// nothing to resume.
+func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, resumed []agent.Message, savedAt time.Time) Model {
 	ti := textinput.New()
 	ti.Placeholder = "ask chisel to do something…"
 	ti.Focus()
@@ -73,6 +78,7 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, resumed 
 		client:        client,
 		workDir:       workDir,
 		bash:          bash,
+		mcp:           mcpRegistry,
 		messages:      resumed,
 		textInput:     ti,
 		viewport:      viewport.New(80, 20),
@@ -133,10 +139,42 @@ func (m *Model) endStreamLine() {
 	m.streamText = ""
 }
 
-func executeTool(workDir string, bash *agent.BashSession, call agent.ToolCall) tea.Cmd {
+func executeTool(workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, call agent.ToolCall) tea.Cmd {
 	return func() tea.Msg {
+		if mcp.IsToolName(call.Function.Name) {
+			args := json.RawMessage(call.Function.Arguments)
+			content, isError, err := mcpRegistry.Call(context.Background(), call.Function.Name, args)
+			if err != nil {
+				return toolResultMsg{result: agent.ToolResult{ID: call.ID, Content: err.Error(), IsError: true}}
+			}
+			return toolResultMsg{result: agent.ToolResult{ID: call.ID, Content: content, IsError: isError}}
+		}
 		return toolResultMsg{result: agent.Execute(context.Background(), workDir, call, bash)}
 	}
+}
+
+// summarizeCall renders a permission-prompt-friendly description of call,
+// prettifying chisel's mcp__server__tool naming into "server: tool" —
+// agent.Summarize itself doesn't know about that convention, by design
+// (see internal/mcp's package doc), so this is purely a display-layer
+// improvement on top of it.
+func summarizeCall(call agent.ToolCall) string {
+	if server, tool, ok := mcp.SplitToolName(call.Function.Name); ok {
+		return fmt.Sprintf("%s: %s", server, tool)
+	}
+	return agent.Summarize(call)
+}
+
+// needsPermission reports whether call must be confirmed before running.
+// Every MCP-sourced tool always needs permission — chisel has no way to
+// know what an arbitrary server's tool actually does, so it can't apply
+// the same read-only auto-allow heuristic agent.NeedsPermission uses for
+// its own fixed tools.
+func needsPermission(call agent.ToolCall) bool {
+	if mcp.IsToolName(call.Function.Name) {
+		return true
+	}
+	return agent.NeedsPermission(call)
 }
 
 // saveSession persists messages as the current session for workDir. A

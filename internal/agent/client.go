@@ -58,6 +58,13 @@ func (c *Client) ModelName() string {
 	return c.model
 }
 
+// AddTools appends to the tool set sent with every request — for tools
+// discovered at runtime (MCP servers) rather than chisel's fixed built-in
+// set from buildTools.
+func (c *Client) AddTools(tools []Tool) {
+	c.tools = append(c.tools, tools...)
+}
+
 type chatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`

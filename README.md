@@ -2,7 +2,7 @@
 
 A personal terminal coding agent: a Bubbletea TUI wrapped around an
 [OpenCode Go](https://opencode.ai/go) model with a small, fixed tool set
-(`bash`, file editing, `glob`, `grep`).
+(`bash`, file editing, `glob`, `grep`), extensible with MCP servers.
 
 ## Build & run
 
@@ -24,6 +24,28 @@ Conversations save automatically per working directory
 File edits show a diff before you approve them. `/git auto on` (off by
 default) makes chisel commit its own changes after each turn, Aider-style.
 
+## MCP servers
+
+List servers in `~/.chisel/mcp.json` — same `mcpServers` shape Claude
+Desktop and Claude Code use:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "..." }
+    }
+  }
+}
+```
+
+Discovered tools show up as `server: tool` in the permission prompt and
+always require approval — chisel has no way to know what an arbitrary
+server's tool actually does. A server that fails to start is logged to
+stderr and skipped; chisel still runs fine with whatever did start.
+
 ## Development
 
 ```sh
@@ -39,6 +61,6 @@ it on every push. Live-network tests against the real API
 
 ## Status
 
-Phase 1 (minimum viable agent) done, Phase 2 (daily driver) in progress —
-see [`docs/design.md`](docs/design.md) for the full design notes,
-architecture rationale, and roadmap.
+Phase 1 (minimum viable agent) and Phase 2 (daily driver) done, Phase 3
+(real capability) in progress — see [`docs/design.md`](docs/design.md)
+for the full design notes, architecture rationale, and roadmap.
