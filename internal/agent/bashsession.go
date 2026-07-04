@@ -192,6 +192,14 @@ func (s *BashSession) run(ctx context.Context, command string) (string, error) {
 		}
 		return formatBashOutput(r.output, r.code), nil
 	case <-timeoutCtx.Done():
+		// timeoutCtx.Done can fire for two different reasons: bashCommandTimeout
+		// actually elapsed, or the caller cancelled ctx itself (esc, while
+		// busy) — check ctx.Err(), not timeoutCtx.Err(), to tell them apart,
+		// since a caller-cancelled ctx should read as "interrupted", not
+		// "timed out", even though both derive the same Done() signal.
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("command timed out after %s", bashCommandTimeout)
 	}
 }

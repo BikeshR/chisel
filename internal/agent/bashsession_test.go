@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -170,6 +171,34 @@ func TestBashSessionTimeout(t *testing.T) {
 	}
 	if strings.TrimSpace(out) != "recovered" {
 		t.Errorf("output after recovery = %q", out)
+	}
+}
+
+// TestBashSessionCallerCancellationIsNotReportedAsATimeout is the
+// regression test for a subtlety the esc-to-interrupt feature depends
+// on: a caller cancelling the passed-in ctx (not chisel's own
+// bashCommandTimeout elapsing) must surface as context.Canceled, not the
+// generic "command timed out" message — the TUI renders those two cases
+// very differently ("interrupted" vs a real timeout warning).
+func TestBashSessionCallerCancellationIsNotReportedAsATimeout(t *testing.T) {
+	s := NewBashSession(t.TempDir())
+	defer s.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := s.Run(ctx, "sleep 5", false)
+	if err == nil {
+		t.Fatal("expected an error after the caller cancelled ctx")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want it to wrap context.Canceled", err)
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("err = %v, want it distinguished from chisel's own bashCommandTimeout", err)
 	}
 }
 

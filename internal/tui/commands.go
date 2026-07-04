@@ -136,7 +136,7 @@ func (m Model) handleModelCommand(args []string) (Model, tea.Cmd) {
 		}
 		m.appendLine(dimStyle.Render("checking " + target + "…"))
 		m.state = stateWaitingModel
-		return m, checkModel(target)
+		return m, checkModel(m.newTurnContext(), target)
 	}
 
 	name := args[0]
@@ -150,10 +150,10 @@ func (m Model) handleModelCommand(args []string) (Model, tea.Cmd) {
 // — so it catches the same class of failure found earlier in this
 // project's development (a model or provider rejecting the tool set
 // outright), not just plain reachability.
-func checkModel(name string) tea.Cmd {
+func checkModel(ctx context.Context, name string) tea.Cmd {
 	return func() tea.Msg {
 		client := agent.New(name)
-		ch, err := client.SendStreaming(context.Background(), []agent.Message{
+		ch, err := client.SendStreaming(ctx, []agent.Message{
 			{Role: "user", Content: "Reply with exactly the word: ok"},
 		})
 		if err != nil {
@@ -169,9 +169,10 @@ func checkModel(name string) tea.Cmd {
 }
 
 func (m Model) handleModelCheckResult(msg modelCheckResultMsg) (tea.Model, tea.Cmd) {
+	m.endTurn()
 	m.state = stateInput
 	if msg.err != nil {
-		m.appendLine(errorStyle.Render(fmt.Sprintf("✗ %s: %s", msg.model, msg.err.Error())))
+		m.appendLine(errorStyle.Render(fmt.Sprintf("✗ %s: %s", msg.model, interruptibleErrorText(msg.err))))
 		return m, nil
 	}
 	m.appendLine(dimStyle.Render(fmt.Sprintf("✓ %s: %s", msg.model, firstLine(msg.reply))))
@@ -189,16 +190,17 @@ func (m Model) handleCompactCommand() (Model, tea.Cmd) {
 	}
 	m.appendLine(dimStyle.Render("compacting…"))
 	m.state = stateWaitingModel
-	return m, compact(m.client, m.messages)
+	return m, compact(m.newTurnContext(), m.client, m.messages)
 }
 
 func (m Model) handleCompactResult(msg compactResultMsg) (tea.Model, tea.Cmd) {
+	m.endTurn()
 	m.state = stateInput
 	m.tokensIn += msg.usage.InputTokens
 	m.tokensOut += msg.usage.OutputTokens
 
 	if msg.err != nil {
-		m.appendLine(errorStyle.Render("compact failed: " + msg.err.Error()))
+		m.appendLine(errorStyle.Render("compact failed: " + interruptibleErrorText(msg.err)))
 		return m, nil
 	}
 

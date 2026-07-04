@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -71,6 +72,48 @@ type Model struct {
 	width, height     int
 	err               error
 	quitting          bool
+
+	// cancelTurn cancels whatever's currently in flight (a model request,
+	// a tool call) — set by newTurnContext at the start of any async
+	// operation, called by esc while busy (see handleKey). nil when
+	// nothing is running.
+	cancelTurn context.CancelFunc
+}
+
+// newTurnContext creates a fresh cancellable context for one async
+// operation (a model request or a tool call) and stashes its cancel func
+// so esc can abort it later. Cancelling a context already threaded
+// through client.SendStreaming (via http.NewRequestWithContext) and
+// BashSession.Run needs no further plumbing in either — both already
+// respect ctx.Done(); this just makes sure a *real*, cancellable context
+// reaches them instead of context.Background(). Any prior turn's cancel
+// is called first — defensive, since the state machine shouldn't
+// normally have two in flight at once, but leaking one would be a silent
+// resource leak if that ever stopped being true.
+func (m *Model) newTurnContext() context.Context {
+	if m.cancelTurn != nil {
+		m.cancelTurn()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelTurn = cancel
+	return ctx
+}
+
+// endTurn clears the stashed cancel func once a turn is fully done —
+// calling an already-fired CancelFunc again is harmless, but holding
+// onto a stale one is just clutter once there's nothing left to cancel.
+func (m *Model) endTurn() {
+	m.cancelTurn = nil
+}
+
+// interruptibleErrorText renders err for display, showing a plain
+// "interrupted" instead of the raw (fairly unfriendly) "context
+// canceled" whenever esc is what actually caused it.
+func interruptibleErrorText(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "interrupted"
+	}
+	return err.Error()
 }
 
 // New builds the initial Model for a chisel session rooted at workDir.
@@ -179,9 +222,8 @@ func (m *Model) endStreamLine() {
 // approved via the permission prompt, rather than pre-empting the prompt
 // entirely — accepted for the simplicity of not needing a second async
 // round-trip before every permission decision.
-func executeTool(workDir, model string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, call agent.ToolCall) tea.Cmd {
+func executeTool(ctx context.Context, workDir, model string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, call agent.ToolCall) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
 		path := toolPath(call)
 
 		blocked, reason, err := hooks.RunPreToolUse(ctx, workDir, hooksCfg.Hooks.PreToolUse, call.Function.Name, call.Function.Arguments, path)
@@ -333,11 +375,11 @@ const compactPrompt = "Summarize this conversation so far in a concise form for 
 
 // compact sends messages plus the compaction instruction and returns the
 // model's summary.
-func compact(client *agent.Client, messages []agent.Message) tea.Cmd {
+func compact(ctx context.Context, client *agent.Client, messages []agent.Message) tea.Cmd {
 	return func() tea.Msg {
 		history := append(append([]agent.Message{}, messages...), agent.Message{Role: "user", Content: compactPrompt})
 
-		ch, err := client.SendStreaming(context.Background(), history)
+		ch, err := client.SendStreaming(ctx, history)
 		if err != nil {
 			return compactResultMsg{err: err}
 		}

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +39,7 @@ func TestExecuteToolBlockedByPreHook(t *testing.T) {
 		Arguments: `{"command":"str_replace","path":"protected.go","old_str":"package main","new_str":"package other"}`,
 	}}
 
-	cmd := executeTool(dir, "minimax-m3", nil, nil, hooksCfg, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, call)
 	msg := cmd()
 
 	result, ok := msg.(toolResultMsg)
@@ -78,7 +79,7 @@ func TestExecuteToolAllowedByPreHook(t *testing.T) {
 		Arguments: `{"command":"str_replace","path":"a.go","old_str":"package main","new_str":"package other"}`,
 	}}
 
-	cmd := executeTool(dir, "minimax-m3", nil, nil, hooksCfg, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, call)
 	result := cmd().(toolResultMsg).result
 	if result.IsError {
 		t.Fatalf("call was blocked unexpectedly: %s", result.Content)
@@ -101,7 +102,7 @@ func TestExecuteToolPostHookOutputAppended(t *testing.T) {
 		Arguments: `{"command":"str_replace","path":"a.go","old_str":"package main","new_str":"package other"}`,
 	}}
 
-	cmd := executeTool(dir, "minimax-m3", nil, nil, hooksCfg, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, call)
 	result := cmd().(toolResultMsg).result
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content)
@@ -125,7 +126,7 @@ func TestExecuteToolPostHookSkippedOnFailure(t *testing.T) {
 		Arguments: `{"command":"str_replace","path":"nonexistent.go","old_str":"x","new_str":"y"}`,
 	}}
 
-	cmd := executeTool(dir, "minimax-m3", nil, nil, hooksCfg, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, call)
 	result := cmd().(toolResultMsg).result
 	if !result.IsError {
 		t.Fatal("expected the edit itself to fail (file doesn't exist)")

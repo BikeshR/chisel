@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -80,7 +82,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			call := m.pendingUses[0]
 			m.state = stateExecutingTool
 			m.appendLine(dimStyle.Render("  → approved"))
-			return m, executeTool(m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, call)
+			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, call)
 		case "n", "N", "esc":
 			return m.handleToolResult(agent.ToolResult{
 				ID:      m.pendingUses[0].ID,
@@ -98,8 +100,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.textInput, cmd = m.textInput.Update(msg)
 		return m, cmd
 
+	case stateWaitingModel, stateExecutingTool:
+		// Busy: every other keystroke is ignored, but esc aborts whatever
+		// is running — an in-flight model request or tool call — via the
+		// context newTurnContext stashed when it started. The operation's
+		// own error path (handleStreamEvent, handleToolResult via
+		// executeTool's result) picks up from there and returns to
+		// stateInput; esc itself doesn't touch state.
+		if msg.Type == tea.KeyEsc && m.cancelTurn != nil {
+			m.cancelTurn()
+		}
+		return m, nil
+
 	default:
-		// Busy (waiting on the model or a tool) — ignore keystrokes.
 		return m, nil
 	}
 }
@@ -131,7 +144,8 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.appendLine(userStyle.Render("you  ") + text)
 	m.state = stateWaitingModel
 
-	return m, tea.Batch(startStream(m.client, m.messages), saveSession(m.workDir, m.messages), textinput.Blink)
+	ctx := m.newTurnContext()
+	return m, tea.Batch(startStream(ctx, m.client, m.messages), saveSession(m.workDir, m.messages), textinput.Blink)
 }
 
 // handleStreamEvent processes one event from the in-flight response. While
@@ -150,11 +164,18 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if ev.Err != nil {
+		m.endTurn()
 		m.err = ev.Err
 		m.endStreamLine()
-		m.appendLine(errorStyle.Render("error  " + ev.Err.Error()))
+		m.appendLine(errorStyle.Render("error  " + interruptibleErrorText(ev.Err)))
 		m.state = stateInput
-		return m, nil
+		// No notification for a cancellation — esc means the user is
+		// already at the keyboard, mid-keypress; a genuine error while
+		// they may have stepped away is the case worth surfacing.
+		if errors.Is(ev.Err, context.Canceled) {
+			return m, nil
+		}
+		return m, notifyIdle("chisel hit an error")
 	}
 
 	return m.handleStreamComplete(*ev.Message, ev.Usage)
@@ -175,12 +196,14 @@ func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage) (tea.
 	m.pendingUses = resp.ToolCalls
 
 	if len(m.pendingUses) == 0 {
+		m.endTurn()
 		m.state = stateInput
 		save := saveSession(m.workDir, m.messages)
+		notify := notifyIdle("chisel is done")
 		if m.autoCommit {
-			return m, tea.Batch(save, autoCommit(m.workDir, m.preTurnDirty, lastUserText(m.messages)))
+			return m, tea.Batch(save, notify, autoCommit(m.workDir, m.preTurnDirty, lastUserText(m.messages)))
 		}
-		return m, save
+		return m, tea.Batch(save, notify)
 	}
 
 	// Deliberately not saving here: resp (just appended above) carries
@@ -200,6 +223,7 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	// that's enforced by their control flow, not by this function itself
 	// — guard it directly rather than relying on callers to keep doing so.
 	if len(m.pendingUses) == 0 {
+		m.endTurn()
 		m.state = stateInput
 		return m, nil
 	}
@@ -220,18 +244,19 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	}
 
 	if needsPermission(call) {
+		m.endTurn() // nothing async is in flight while waiting on a y/n decision
 		m.state = stateAwaitingPermission
 		prompt := fmt.Sprintf("allow %s?  [y/n]", summarizeCall(call))
 		if diff, ok := agent.PreviewEdit(m.workDir, call); ok {
 			prompt = fmt.Sprintf("allow %s?\n\n%s\n[y/n]", summarizeCall(call), strings.TrimRight(diff, "\n"))
 		}
 		m.appendLine(permissionStyle.Render(prompt))
-		return m, nil
+		return m, notifyIdle("chisel needs your permission")
 	}
 
 	m.state = stateExecutingTool
 	m.appendLine(toolStyle.Render("  " + summarizeCall(call)))
-	return m, executeTool(m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, call)
+	return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, call)
 }
 
 func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
@@ -240,7 +265,7 @@ func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
 	}
 
 	if result.IsError {
-		m.appendLine(errorStyle.Render("  ✗ " + firstLine(result.Content)))
+		m.appendLine(errorStyle.Render("  ✗ " + firstLine(interruptibleResultText(result.Content))))
 	} else {
 		m.appendLine(dimStyle.Render("  ✓ " + firstLine(result.Content)))
 	}
@@ -255,7 +280,19 @@ func (m Model) handleToolResult(result agent.ToolResult) (tea.Model, tea.Cmd) {
 	m.messages = append(m.messages, m.pendingResults...)
 	m.pendingResults = nil
 	m.state = stateWaitingModel
-	return m, tea.Batch(startStream(m.client, m.messages), saveSession(m.workDir, m.messages))
+	ctx := m.newTurnContext()
+	return m, tea.Batch(startStream(ctx, m.client, m.messages), saveSession(m.workDir, m.messages))
+}
+
+// interruptibleResultText mirrors interruptibleErrorText for a tool
+// result's content — by the time an error reaches here it's already
+// been flattened to a plain string (agent.ToolResult.Content), so this
+// checks for context.Canceled's exact message rather than errors.Is.
+func interruptibleResultText(content string) string {
+	if content == context.Canceled.Error() {
+		return "interrupted"
+	}
+	return content
 }
 
 func firstLine(s string) string {
