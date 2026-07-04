@@ -4,7 +4,9 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,9 +58,15 @@ func main() {
 	}
 	client.AddTools(agentToolsFromMCP(mcpRegistry.Tools()))
 
-	hooksCfg, _, err := hooks.LoadConfig(workDir)
+	hooksCfg, hooksFound, err := hooks.LoadConfig(workDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "chisel: hooks:", err)
+	}
+	if hooksFound && hooksCfg.HasAny() {
+		if !confirmHooksTrust(workDir) {
+			fmt.Fprintln(os.Stderr, "chisel: hooks not trusted — running this session without them")
+			hooksCfg = hooks.Config{}
+		}
 	}
 
 	memContent, memUser, memProject := memory.Load(workDir)
@@ -91,6 +99,54 @@ func agentToolsFromMCP(tools []mcp.Tool) []agent.Tool {
 		}
 	}
 	return out
+}
+
+// confirmHooksTrust asks the user, once per exact hooks.json content,
+// whether chisel may run a project's configured hooks — arbitrary shell
+// commands that would otherwise run automatically on tool calls,
+// including auto-allowed ones like glob/grep that need no confirmation
+// at all. Cloning a hostile repo and asking chisel something as
+// innocuous as "what does this project do?" would otherwise be enough
+// to execute whatever .chisel/hooks.json says. A read or trust-store
+// error is treated as "not trusted" — hooks are a convenience, not
+// something worth risking a broken prompt over.
+func confirmHooksTrust(workDir string) bool {
+	return confirmHooksTrustFrom(workDir, os.Stdin)
+}
+
+// confirmHooksTrustFrom is confirmHooksTrust with its input source
+// injectable, so a test can supply a fake answer instead of reading a
+// real terminal's stdin.
+func confirmHooksTrustFrom(workDir string, in io.Reader) bool {
+	path := hooks.ConfigPath(workDir)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	hash := hooks.ContentHash(data)
+
+	trusted, err := hooks.IsTrusted(hash)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: checking hooks trust:", err)
+		return false
+	}
+	if trusted {
+		return true
+	}
+
+	fmt.Printf("chisel: %s configures hooks — shell commands that run automatically on tool calls, some of which (glob, grep) normally need no confirmation at all.\n", path)
+	fmt.Print("Trust and run them for this project? [y/N] ")
+
+	reader := bufio.NewReader(in)
+	line, _ := reader.ReadString('\n')
+	if answer := strings.ToLower(strings.TrimSpace(line)); answer != "y" && answer != "yes" {
+		return false
+	}
+
+	if err := hooks.Trust(hash); err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: saving hooks trust decision:", err)
+	}
+	return true
 }
 
 // loadDotEnv sets environment variables from ~/.chisel.env if the file

