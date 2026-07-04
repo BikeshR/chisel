@@ -380,10 +380,25 @@ func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage, finis
 			notify = notifyIdle("chisel is done")
 		}
 
+		var autoCommitCmd tea.Cmd
 		if m.autoCommit {
-			return m, tea.Batch(save, notify, queued, autoCommit(m.workDir, m.preTurnDirty, lastUserText(m.messages)))
+			autoCommitCmd = autoCommit(m.workDir, m.preTurnDirty, lastUserText(m.messages))
 		}
-		return m, tea.Batch(save, notify, queued)
+
+		// Auto-compact once the context is large enough that the status
+		// bar would already be warning about it — same threshold, just
+		// acted on instead of left for the user to notice and type
+		// /compact themselves. Only when genuinely idle (nothing
+		// queued): compacting is itself a turn, and a queued message
+		// means the user's already mid-flow and shouldn't be interrupted
+		// by an extra step in between.
+		if queued == nil && m.lastContextTokens >= contextWarnThreshold {
+			m.appendLine(dimStyle.Render("context is large — compacting automatically…"))
+			m.state = stateWaitingModel
+			return m, tea.Batch(save, notify, autoCommitCmd, compact(m.newTurnContext(), m.client, m.messages))
+		}
+
+		return m, tea.Batch(save, notify, queued, autoCommitCmd)
 	}
 
 	// Deliberately not saving here: resp (just appended above) carries
