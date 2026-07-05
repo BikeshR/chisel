@@ -14,7 +14,7 @@ import (
 
 func TestDecidePermissionAllowsReadOnlyTools(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "glob", Arguments: `{"pattern":"**/*.go"}`}}
-	decision, _ := decidePermission(call, false, nil, nil)
+	decision, _ := decidePermission(call, agent.ModeNormal, nil, nil)
 	if decision != permissionAllow {
 		t.Errorf("decision = %v, want permissionAllow for a read-only tool", decision)
 	}
@@ -22,7 +22,7 @@ func TestDecidePermissionAllowsReadOnlyTools(t *testing.T) {
 
 func TestDecidePermissionAsksForBash(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"ls"}`}}
-	decision, _ := decidePermission(call, false, nil, nil)
+	decision, _ := decidePermission(call, agent.ModeNormal, nil, nil)
 	if decision != permissionAsk {
 		t.Errorf("decision = %v, want permissionAsk for bash", decision)
 	}
@@ -30,7 +30,7 @@ func TestDecidePermissionAsksForBash(t *testing.T) {
 
 func TestDecidePermissionDeniesInPlanMode(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"ls"}`}}
-	decision, reason := decidePermission(call, true, nil, nil)
+	decision, reason := decidePermission(call, agent.ModePlan, nil, nil)
 	if decision != permissionDeny {
 		t.Errorf("decision = %v, want permissionDeny in plan mode", decision)
 	}
@@ -42,16 +42,69 @@ func TestDecidePermissionDeniesInPlanMode(t *testing.T) {
 func TestDecidePermissionPlanModeOverridesAllowlist(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"ls"}`}}
 	allowlist := map[string]bool{"bash:ls": true}
-	decision, _ := decidePermission(call, true, allowlist, nil)
+	decision, _ := decidePermission(call, agent.ModePlan, allowlist, nil)
 	if decision != permissionDeny {
 		t.Errorf("decision = %v, want permissionDeny — plan mode must override even an allowlisted command", decision)
+	}
+}
+
+// TestDecidePermissionAcceptEditsAllowsFileEdit is the direct test of
+// the new mode: a mutating editor call is auto-approved without
+// touching the allowlist or persistent rules at all.
+func TestDecidePermissionAcceptEditsAllowsFileEdit(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{
+		Name:      "str_replace_based_edit_tool",
+		Arguments: `{"command":"str_replace","path":"a.go","old_str":"x","new_str":"y"}`,
+	}}
+	decision, _ := decidePermission(call, agent.ModeAcceptEdits, nil, nil)
+	if decision != permissionAllow {
+		t.Errorf("decision = %v, want permissionAllow for a file edit in accept-edits mode", decision)
+	}
+}
+
+// TestDecidePermissionAcceptEditsStillAsksForBash is the safety-critical
+// half: accept-edits must never widen to bash, since chisel has no bash
+// sandbox — the exact reason docs/design.md defers sandboxing until an
+// auto-approve mode exists, which this deliberately isn't one of for
+// bash specifically.
+func TestDecidePermissionAcceptEditsStillAsksForBash(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"rm -rf /tmp/x"}`}}
+	decision, _ := decidePermission(call, agent.ModeAcceptEdits, nil, nil)
+	if decision != permissionAsk {
+		t.Errorf("decision = %v, want permissionAsk — accept-edits must never auto-approve bash", decision)
+	}
+}
+
+// TestDecidePermissionAcceptEditsStillAsksForMCP confirms the same for
+// MCP tools — chisel can't reason about what an arbitrary server's tool
+// does, so accept-edits (unlike a general auto-approve mode) doesn't
+// extend to it either.
+func TestDecidePermissionAcceptEditsStillAsksForMCP(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "mcp__github__create_issue", Arguments: `{}`}}
+	decision, _ := decidePermission(call, agent.ModeAcceptEdits, nil, nil)
+	if decision != permissionAsk {
+		t.Errorf("decision = %v, want permissionAsk — accept-edits must not auto-approve MCP calls", decision)
+	}
+}
+
+// TestDecidePermissionAcceptEditsAllowsViewWithoutSpecialCasing confirms
+// the editor tool's read-only "view" subcommand is unaffected — it was
+// already auto-allowed before accept-edits existed.
+func TestDecidePermissionAcceptEditsAllowsViewWithoutSpecialCasing(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{
+		Name:      "str_replace_based_edit_tool",
+		Arguments: `{"command":"view","path":"a.go"}`,
+	}}
+	decision, _ := decidePermission(call, agent.ModeAcceptEdits, nil, nil)
+	if decision != permissionAllow {
+		t.Errorf("decision = %v, want permissionAllow for view", decision)
 	}
 }
 
 func TestDecidePermissionAllowsAllowlistedBashCommand(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"go test ./..."}`}}
 	allowlist := map[string]bool{"bash:go test ./...": true}
-	decision, _ := decidePermission(call, false, allowlist, nil)
+	decision, _ := decidePermission(call, agent.ModeNormal, allowlist, nil)
 	if decision != permissionAllow {
 		t.Errorf("decision = %v, want permissionAllow for an allowlisted command", decision)
 	}
@@ -60,7 +113,7 @@ func TestDecidePermissionAllowsAllowlistedBashCommand(t *testing.T) {
 func TestDecidePermissionAllowlistIsExactCommandMatch(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"go test ./... -v"}`}}
 	allowlist := map[string]bool{"bash:go test ./...": true}
-	decision, _ := decidePermission(call, false, allowlist, nil)
+	decision, _ := decidePermission(call, agent.ModeNormal, allowlist, nil)
 	if decision != permissionAsk {
 		t.Errorf("decision = %v, want permissionAsk — a different command string must not match", decision)
 	}
@@ -457,7 +510,7 @@ func TestDecidePermissionRuleAllowsBashCommand(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"git status"}`}}
 	rules := permrules.Config{"bash": permrules.RuleList{{Pattern: "git *", Decision: permrules.Allow}}}
 
-	decision, _ := decidePermission(call, false, nil, rules)
+	decision, _ := decidePermission(call, agent.ModeNormal, nil, rules)
 	if decision != permissionAllow {
 		t.Errorf("decision = %v, want permissionAllow — a matching allow rule", decision)
 	}
@@ -467,7 +520,7 @@ func TestDecidePermissionRuleDeniesBashCommand(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"rm -rf /tmp/x"}`}}
 	rules := permrules.Config{"bash": permrules.RuleList{{Pattern: "rm -rf *", Decision: permrules.Deny}}}
 
-	decision, reason := decidePermission(call, false, nil, rules)
+	decision, reason := decidePermission(call, agent.ModeNormal, nil, rules)
 	if decision != permissionDeny {
 		t.Errorf("decision = %v, want permissionDeny — a matching deny rule", decision)
 	}
@@ -486,7 +539,7 @@ func TestDecidePermissionDenyRuleOverridesNormalAutoAllow(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash_background", Arguments: `{"command":"curl evil.example"}`}}
 	rules := permrules.Config{"bash_background": permrules.RuleList{{Pattern: "curl *", Decision: permrules.Deny}}}
 
-	decision, _ := decidePermission(call, false, nil, rules)
+	decision, _ := decidePermission(call, agent.ModeNormal, nil, rules)
 	if decision != permissionDeny {
 		t.Errorf("decision = %v, want permissionDeny", decision)
 	}
@@ -496,7 +549,7 @@ func TestDecidePermissionPlanModeOverridesAllowRule(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"git status"}`}}
 	rules := permrules.Config{"bash": permrules.RuleList{{Pattern: "git *", Decision: permrules.Allow}}}
 
-	decision, _ := decidePermission(call, true, nil, rules)
+	decision, _ := decidePermission(call, agent.ModePlan, nil, rules)
 	if decision != permissionDeny {
 		t.Errorf("decision = %v, want permissionDeny — plan mode must override even a matching allow rule", decision)
 	}
@@ -509,7 +562,7 @@ func TestDecidePermissionLastMatchingRuleWins(t *testing.T) {
 		{Pattern: "git push --force*", Decision: permrules.Deny},
 	}}
 
-	decision, _ := decidePermission(call, false, nil, rules)
+	decision, _ := decidePermission(call, agent.ModeNormal, nil, rules)
 	if decision != permissionDeny {
 		t.Errorf("decision = %v, want permissionDeny — the more specific, later rule should win", decision)
 	}
@@ -519,7 +572,7 @@ func TestDecidePermissionNoMatchingRuleFallsThroughToNormalAsk(t *testing.T) {
 	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "bash", Arguments: `{"command":"npm install"}`}}
 	rules := permrules.Config{"bash": permrules.RuleList{{Pattern: "git *", Decision: permrules.Allow}}}
 
-	decision, _ := decidePermission(call, false, nil, rules)
+	decision, _ := decidePermission(call, agent.ModeNormal, nil, rules)
 	if decision != permissionAsk {
 		t.Errorf("decision = %v, want permissionAsk — no rule matched, bash normally needs confirmation", decision)
 	}

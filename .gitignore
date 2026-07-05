@@ -1,3 +1,9 @@
 /chisel
 *.bak
 .DS_Store
+
+# Agent-writable memory (see internal/agentmemory) — auto-generated,
+# evolving notes chisel wrote to itself, not deliberately-authored
+# config like .chisel/hooks.json or .chisel/mcp.json (which ARE meant
+# to be committed).
+.chisel/MEMORY.md

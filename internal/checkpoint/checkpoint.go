@@ -180,6 +180,18 @@ func (s *Store) Restore(hash string) error {
 	return nil
 }
 
+// Diff returns the unified diff between hash's file tree and the
+// current working-directory state — the same comparison Restore would
+// make destructive (reset --hard to hash), without touching any files.
+// Empty if nothing has changed since hash.
+func (s *Store) Diff(hash string) (string, error) {
+	out, err := s.git("diff", hash, "--", ".", ":!.git", ":!.chisel")
+	if err != nil {
+		return "", fmt.Errorf("diff against checkpoint: %w", err)
+	}
+	return out, nil
+}
+
 // maxCheckpointHistory bounds how many commits the shadow repo keeps —
 // without this, a long-running daily-driver project accumulates one
 // checkpoint commit per turn forever, growing the shadow repo's on-disk

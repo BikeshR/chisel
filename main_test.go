@@ -197,6 +197,43 @@ func TestConfirmHooksTrustShowsMatchAndCommand(t *testing.T) {
 	}
 }
 
+// TestConfirmHooksTrustShowsNewEventTypes is the regression test for a
+// gap the sessionStart/sessionEnd/userPromptSubmit addition could
+// otherwise leave behind: a hooks.json containing ONLY these new event
+// types (no preToolUse/postToolUse at all) must still list its actual
+// commands in the trust prompt, not fall back to the generic message —
+// the enrichment has to cover every event type HasAny recognizes, not
+// just the original two.
+func TestConfirmHooksTrustShowsNewEventTypes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := t.TempDir()
+	hooksPath := filepath.Join(workDir, ".chisel", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooksPath, []byte(`{"hooks":{"userPromptSubmit":[{"command":"check-secrets.sh"}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	confirmHooksTrustFrom(workDir, strings.NewReader("n\n"))
+	os.Stdout = origStdout
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+
+	printed := string(out)
+	if !strings.Contains(printed, "check-secrets.sh") {
+		t.Errorf("printed prompt = %q, want the userPromptSubmit hook's command shown, not the generic fallback message", printed)
+	}
+}
+
 func TestRunHeadlessCoreReturnsFinalAnswer(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/event-stream")
@@ -207,7 +244,7 @@ func TestRunHeadlessCoreReturnsFinalAnswer(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	answer, _, err := runHeadlessCore(t.TempDir(), "minimax-m3", "what is the answer?")
+	answer, _, err := runHeadlessCore(t.TempDir(), "minimax-m3", "what is the answer?", nil)
 	if err != nil {
 		t.Fatalf("runHeadlessCore: %v", err)
 	}
@@ -243,7 +280,7 @@ func TestRunHeadlessCoreUsesReadOnlyTools(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	if _, _, err := runHeadlessCore(t.TempDir(), "minimax-m3", "hi"); err != nil {
+	if _, _, err := runHeadlessCore(t.TempDir(), "minimax-m3", "hi", nil); err != nil {
 		t.Fatalf("runHeadlessCore: %v", err)
 	}
 
@@ -293,7 +330,7 @@ func TestRunHeadlessCoreRejectsHallucinatedMutatingToolCall(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	if _, _, err := runHeadlessCore(dir, "minimax-m3", "do something"); err != nil {
+	if _, _, err := runHeadlessCore(dir, "minimax-m3", "do something", nil); err != nil {
 		t.Fatalf("runHeadlessCore: %v", err)
 	}
 
@@ -306,6 +343,126 @@ func TestRunHeadlessCoreRejectsHallucinatedMutatingToolCall(t *testing.T) {
 	}
 }
 
+// TestRunHeadlessCoreReportsToolCallEventsToOnEvent is the direct test
+// of -json-stream's underlying plumbing: onEvent must see a "start"
+// then an "end" for each real tool call the loop actually executes.
+func TestRunHeadlessCoreReportsToolCallEventsToOnEvent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	call := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		if call == 0 {
+			call++
+			_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"finish_reason":"tool_calls","delta":{"role":"assistant","content":"","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"glob","arguments":"{\"pattern\":\"*.txt\"}"}}]}}]}` + "\n\ndata: [DONE]\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"finish_reason":"stop","delta":{"role":"assistant","content":"done"}}]}` + "\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	var events []agent.LoopEvent
+	_, _, err := runHeadlessCore(dir, "minimax-m3", "list txt files", func(ev agent.LoopEvent) {
+		events = append(events, ev)
+	})
+	if err != nil {
+		t.Fatalf("runHeadlessCore: %v", err)
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want exactly 2 (start, end)", events)
+	}
+	if events[0].Phase != "start" || events[0].Tool != "glob" {
+		t.Errorf("events[0] = %+v, want a start event for glob", events[0])
+	}
+	if events[1].Phase != "end" || events[1].Tool != "glob" || events[1].IsError {
+		t.Errorf("events[1] = %+v, want a successful end event for glob", events[1])
+	}
+}
+
+func TestFormatNDJSONToolCallStartAndEnd(t *testing.T) {
+	startLine, err := formatNDJSONToolCall(agent.LoopEvent{Phase: "start", Tool: "glob"})
+	if err != nil {
+		t.Fatalf("formatNDJSONToolCall: %v", err)
+	}
+	var start struct {
+		Type  string `json:"type"`
+		Phase string `json:"phase"`
+		Tool  string `json:"tool"`
+	}
+	if err := json.Unmarshal([]byte(startLine), &start); err != nil {
+		t.Fatalf("output isn't valid JSON: %v — got %q", err, startLine)
+	}
+	if start.Type != "tool_call" || start.Phase != "start" || start.Tool != "glob" {
+		t.Errorf("start = %+v", start)
+	}
+
+	endLine, err := formatNDJSONToolCall(agent.LoopEvent{Phase: "end", Tool: "glob", Result: "a.txt\nb.txt", IsError: false})
+	if err != nil {
+		t.Fatalf("formatNDJSONToolCall: %v", err)
+	}
+	var end struct {
+		Type    string `json:"type"`
+		Phase   string `json:"phase"`
+		Tool    string `json:"tool"`
+		Result  string `json:"result"`
+		IsError bool   `json:"is_error"`
+	}
+	if err := json.Unmarshal([]byte(endLine), &end); err != nil {
+		t.Fatalf("output isn't valid JSON: %v — got %q", err, endLine)
+	}
+	if end.Type != "tool_call" || end.Phase != "end" || end.Result != "a.txt\nb.txt" || end.IsError {
+		t.Errorf("end = %+v", end)
+	}
+}
+
+func TestFormatNDJSONResultHasTypeDiscriminator(t *testing.T) {
+	line, err := formatNDJSONResult("the answer is 42", agent.Usage{InputTokens: 120, OutputTokens: 8}, nil)
+	if err != nil {
+		t.Fatalf("formatNDJSONResult: %v", err)
+	}
+	var got struct {
+		Type   string `json:"type"`
+		Answer string `json:"answer"`
+		Usage  struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(line), &got); err != nil {
+		t.Fatalf("output isn't valid JSON: %v — got %q", err, line)
+	}
+	if got.Type != "result" {
+		t.Errorf("Type = %q, want \"result\" so a line-oriented parser can tell this apart from a tool_call line", got.Type)
+	}
+	if got.Answer != "the answer is 42" || got.Usage.InputTokens != 120 || got.Usage.OutputTokens != 8 {
+		t.Errorf("got = %+v", got)
+	}
+}
+
+func TestFormatNDJSONResultFailure(t *testing.T) {
+	line, err := formatNDJSONResult("", agent.Usage{}, fmt.Errorf("upstream returned 500"))
+	if err != nil {
+		t.Fatalf("formatNDJSONResult: %v", err)
+	}
+	var got struct {
+		Type  string `json:"type"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(line), &got); err != nil {
+		t.Fatalf("output isn't valid JSON: %v — got %q", err, line)
+	}
+	if got.Type != "result" || got.Error != "upstream returned 500" {
+		t.Errorf("got = %+v", got)
+	}
+}
+
 func TestRunHeadlessCorePropagatesError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -315,7 +472,7 @@ func TestRunHeadlessCorePropagatesError(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	if _, _, err := runHeadlessCore(t.TempDir(), "minimax-m3", "hi"); err == nil {
+	if _, _, err := runHeadlessCore(t.TempDir(), "minimax-m3", "hi", nil); err == nil {
 		t.Error("expected an error from a failing request")
 	}
 }
@@ -702,7 +859,7 @@ func TestRunHeadlessCoreReturnsUsage(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	_, usage, err := runHeadlessCore(t.TempDir(), "minimax-m3", "hi")
+	_, usage, err := runHeadlessCore(t.TempDir(), "minimax-m3", "hi", nil)
 	if err != nil {
 		t.Fatalf("runHeadlessCore: %v", err)
 	}

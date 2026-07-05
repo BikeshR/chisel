@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/BikeshR/chisel/internal/agent"
 	"github.com/BikeshR/chisel/internal/mcp"
 )
 
@@ -119,8 +120,11 @@ func (m Model) statusLine(width int) string {
 	}
 
 	plan := ""
-	if m.client.PlanMode() {
+	switch m.client.Mode() {
+	case agent.ModePlan:
 		plan = planModeStyle.Render("PLAN MODE") + " · "
+	case agent.ModeAcceptEdits:
+		plan = planModeStyle.Render("ACCEPT EDITS") + " · "
 	}
 
 	gitSegment := ""
@@ -148,7 +152,7 @@ func (m Model) statusLine(width int) string {
 	}
 
 	tail := fmt.Sprintf("%s · context %s · spent %s in / %s out · ctrl+c to quit",
-		m.client.ModelName(), context, formatTokenCount(m.tokensIn), formatTokenCount(m.tokensOut))
+		m.client.EffectiveModelName(), context, formatTokenCount(m.tokensIn), formatTokenCount(m.tokensOut))
 
 	// Drop segments least important to see at a glance first: the git
 	// branch/dirty segment (still visible via /status even when dropped

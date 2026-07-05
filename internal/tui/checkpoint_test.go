@@ -56,6 +56,72 @@ func TestRewindBlockedMidTurn(t *testing.T) {
 	}
 }
 
+func TestDiffUnavailableWithoutStore(t *testing.T) {
+	m := Model{state: stateInput}
+	got := m.handleDiffCommand()
+	lines := got.renderedLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "aren't available") {
+		t.Errorf("lines = %+v, want a not-available message", lines)
+	}
+}
+
+func TestDiffNoCheckpointsYet(t *testing.T) {
+	m, _ := newCheckpointTestModel(t)
+	got := m.handleDiffCommand()
+	lines := got.renderedLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "no checkpoints yet") {
+		t.Errorf("lines = %+v", lines)
+	}
+}
+
+// TestDiffShowsChangesSinceLastCheckpoint drives the checkpoint +
+// file-edit + /diff flow end-to-end, mirroring how TestRewindFullFlow
+// below exercises the equivalent /rewind path.
+func TestDiffShowsChangesSinceLastCheckpoint(t *testing.T) {
+	m, workDir := newCheckpointTestModel(t)
+
+	if err := os.WriteFile(filepath.Join(workDir, "a.txt"), []byte("version 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := m.checkpointStore.Checkpoint("first checkpoint")
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	m.checkpoints = append(m.checkpoints, checkpointRecord{hash: hash, label: "first checkpoint"})
+
+	if err := os.WriteFile(filepath.Join(workDir, "a.txt"), []byte("version 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := m.handleDiffCommand()
+	lines := got.renderedLines()
+	if len(lines) != 1 {
+		t.Fatalf("lines = %+v, want a single entry", lines)
+	}
+	if !strings.Contains(lines[0], "version 1") || !strings.Contains(lines[0], "version 2") {
+		t.Errorf("lines[0] = %q, want the actual diff content shown", lines[0])
+	}
+}
+
+func TestDiffNoChangesSinceLastCheckpoint(t *testing.T) {
+	m, workDir := newCheckpointTestModel(t)
+
+	if err := os.WriteFile(filepath.Join(workDir, "a.txt"), []byte("unchanged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := m.checkpointStore.Checkpoint("only checkpoint")
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	m.checkpoints = append(m.checkpoints, checkpointRecord{hash: hash, label: "only checkpoint"})
+
+	got := m.handleDiffCommand()
+	lines := got.renderedLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "no changes since") {
+		t.Errorf("lines = %+v, want a no-changes message", lines)
+	}
+}
+
 // TestRewindFullFlow drives the whole thing end-to-end: two real turns
 // (each writing a different file and checkpointing via submitText),
 // then /rewind 1 to target the checkpoint before the second turn,

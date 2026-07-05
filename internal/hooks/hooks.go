@@ -29,7 +29,10 @@ import (
 var hookTimeout = 30 * time.Second
 
 // Hook is one configured command. Match is a tool name (e.g.
-// "str_replace_based_edit_tool") or "*" for every tool call.
+// "str_replace_based_edit_tool") or "*" for every tool call — ignored
+// for SessionStart, SessionEnd, and UserPromptSubmit, which have no
+// tool call to match against; every hook configured under one of those
+// three runs unconditionally.
 type Hook struct {
 	Match   string `json:"match"`
 	Command string `json:"command"`
@@ -40,6 +43,16 @@ type Config struct {
 	Hooks struct {
 		PreToolUse  []Hook `json:"preToolUse"`
 		PostToolUse []Hook `json:"postToolUse"`
+		// SessionStart fires once at startup, SessionEnd once at exit —
+		// side-effect/notification hooks (a project setup check, a
+		// logged session summary), not gates: neither can block
+		// anything, since there's no call to refuse. UserPromptSubmit
+		// fires before a submitted message reaches the model and *can*
+		// block it, the same way a preToolUse hook blocks a tool call —
+		// see RunUserPromptSubmit.
+		SessionStart     []Hook `json:"sessionStart"`
+		SessionEnd       []Hook `json:"sessionEnd"`
+		UserPromptSubmit []Hook `json:"userPromptSubmit"`
 	} `json:"hooks"`
 }
 
@@ -78,7 +91,7 @@ func RunPreToolUse(ctx context.Context, workDir string, list []Hook, toolName, a
 		if !matches(h, toolName) {
 			continue
 		}
-		output, exitCode, err := run(ctx, workDir, h, toolName, argsJSON, path)
+		output, exitCode, err := run(ctx, workDir, h, "CHISEL_HOOK_TOOL="+toolName, "CHISEL_HOOK_ARGS="+argsJSON, "CHISEL_HOOK_PATH="+path)
 		if err != nil {
 			return false, "", err
 		}
@@ -101,7 +114,7 @@ func RunPostToolUse(ctx context.Context, workDir string, list []Hook, toolName, 
 		if !matches(h, toolName) {
 			continue
 		}
-		output, _, err := run(ctx, workDir, h, toolName, argsJSON, path)
+		output, _, err := run(ctx, workDir, h, "CHISEL_HOOK_TOOL="+toolName, "CHISEL_HOOK_ARGS="+argsJSON, "CHISEL_HOOK_PATH="+path)
 		if err != nil {
 			return "", err
 		}
@@ -112,22 +125,73 @@ func RunPostToolUse(ctx context.Context, workDir string, list []Hook, toolName, 
 	return strings.Join(out, "\n"), nil
 }
 
-// run executes one hook command, with the call it's reacting to available
-// both as environment variables (CHISEL_HOOK_TOOL/ARGS/PATH — the simple
-// case, e.g. checking $CHISEL_HOOK_PATH against a pattern needs no JSON
-// parsing at all) and, for anything more elaborate, CHISEL_HOOK_ARGS
-// carries the tool call's raw JSON arguments.
-func run(ctx context.Context, workDir string, h Hook, toolName, argsJSON, path string) (output string, exitCode int, err error) {
+// RunSessionStart runs every configured SessionStart hook, in order,
+// collecting whatever they print — informational only (there's no tool
+// call, so nothing to block), meant to be shown to the user as a
+// startup notice (a project setup check, for instance).
+func RunSessionStart(ctx context.Context, workDir string, list []Hook) (string, error) {
+	return runAllCollectingOutput(ctx, workDir, list)
+}
+
+// RunSessionEnd runs every configured SessionEnd hook, in order, for
+// side effects only — logging a session summary, say. Its output isn't
+// surfaced anywhere: chisel is already exiting by the time this runs,
+// with nothing left to show it to.
+func RunSessionEnd(ctx context.Context, workDir string, list []Hook) error {
+	_, err := runAllCollectingOutput(ctx, workDir, list)
+	return err
+}
+
+func runAllCollectingOutput(ctx context.Context, workDir string, list []Hook) (string, error) {
+	var out []string
+	for _, h := range list {
+		output, _, err := run(ctx, workDir, h)
+		if err != nil {
+			return "", err
+		}
+		if output = strings.TrimSpace(output); output != "" {
+			out = append(out, output)
+		}
+	}
+	return strings.Join(out, "\n"), nil
+}
+
+// RunUserPromptSubmit runs every configured UserPromptSubmit hook, in
+// order, stopping at the first that blocks (a non-zero exit) — the
+// same contract RunPreToolUse has for a tool call, reacting instead to
+// a message about to be sent to the model. Must be run through the
+// same async tea.Cmd path preToolUse hooks already require (see
+// internal/tui): a hook is an arbitrary shell command that can take
+// real time, so it can't run synchronously on the Update goroutine.
+func RunUserPromptSubmit(ctx context.Context, workDir string, list []Hook, text string) (blocked bool, reason string, err error) {
+	for _, h := range list {
+		output, exitCode, err := run(ctx, workDir, h, "CHISEL_HOOK_TEXT="+text)
+		if err != nil {
+			return false, "", err
+		}
+		if exitCode != 0 {
+			reason := strings.TrimSpace(output)
+			if reason == "" {
+				reason = fmt.Sprintf("blocked by hook %q (exit %d)", h.Command, exitCode)
+			}
+			return true, reason, nil
+		}
+	}
+	return false, "", nil
+}
+
+// run executes one hook command. extraEnv carries whatever the calling
+// event needs available to the command (CHISEL_HOOK_TOOL/ARGS/PATH for
+// a tool-call-shaped event, CHISEL_HOOK_TEXT for UserPromptSubmit, or
+// nothing at all for SessionStart/SessionEnd, which react to no
+// specific input).
+func run(ctx context.Context, workDir string, h Hook, extraEnv ...string) (output string, exitCode int, err error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, hookTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(timeoutCtx, "sh", "-c", h.Command)
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(),
-		"CHISEL_HOOK_TOOL="+toolName,
-		"CHISEL_HOOK_ARGS="+argsJSON,
-		"CHISEL_HOOK_PATH="+path,
-	)
+	cmd.Env = append(os.Environ(), extraEnv...)
 	// Without Setpgid + a Cancel override, context expiry only kills the
 	// immediate sh process — a hook whose own foreground command runs
 	// long after itself backgrounding a child (`sleep 300 &`, a daemon,

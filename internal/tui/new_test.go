@@ -12,7 +12,7 @@ import (
 
 func TestNewShowsWarningWhenSessionLoadFailed(t *testing.T) {
 	client := agent.New("minimax-m3")
-	m := New(client, t.TempDir(), nil, &mcp.Registry{}, hooks.Config{}, false, false, nil, nil, nil, nil, nil, time.Time{}, true, "test-session-id")
+	m := New(client, t.TempDir(), nil, &mcp.Registry{}, hooks.Config{}, false, false, nil, nil, nil, nil, nil, nil, time.Time{}, true, "test-session-id", "")
 
 	found := false
 	for _, line := range m.renderedLines() {
@@ -27,7 +27,7 @@ func TestNewShowsWarningWhenSessionLoadFailed(t *testing.T) {
 
 func TestNewNoWarningOnCleanStart(t *testing.T) {
 	client := agent.New("minimax-m3")
-	m := New(client, t.TempDir(), nil, &mcp.Registry{}, hooks.Config{}, false, false, nil, nil, nil, nil, nil, time.Time{}, false, "test-session-id")
+	m := New(client, t.TempDir(), nil, &mcp.Registry{}, hooks.Config{}, false, false, nil, nil, nil, nil, nil, nil, time.Time{}, false, "test-session-id", "")
 
 	for _, line := range m.renderedLines() {
 		if strings.Contains(line, "couldn't be read") {

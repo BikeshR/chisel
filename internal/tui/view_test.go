@@ -30,6 +30,29 @@ func TestStatusLine(t *testing.T) {
 	}
 }
 
+// TestStatusLineShowsPlannerModelInPlanMode confirms the status bar
+// shows whichever model is actually about to run (EffectiveModelName),
+// not always the primary one — otherwise a configured planner model
+// switching in behind the scenes during plan mode would be invisible.
+func TestStatusLineShowsPlannerModelInPlanMode(t *testing.T) {
+	client := agent.New("minimax-m3")
+	client.SetPlannerModel("glm-5.2")
+	m := Model{client: client}
+
+	if !strings.Contains(m.statusLine(200), "minimax-m3") {
+		t.Error("status line doesn't show the primary model outside plan mode")
+	}
+
+	client.SetMode(agent.ModePlan)
+	line := m.statusLine(200)
+	if !strings.Contains(line, "glm-5.2") {
+		t.Errorf("status line = %q, want the planner model shown once in plan mode", line)
+	}
+	if strings.Contains(line, "minimax-m3") {
+		t.Errorf("status line = %q, want only the effective (planner) model shown, not the primary one too", line)
+	}
+}
+
 func TestStatusLineWarnsPastThreshold(t *testing.T) {
 	m := Model{
 		client:            agent.New("minimax-m3"),

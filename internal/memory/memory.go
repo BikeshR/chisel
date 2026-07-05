@@ -27,12 +27,27 @@ func ProjectPath(workDir string) string {
 	return filepath.Join(workDir, filename)
 }
 
+// AgentsPath returns <workDir>/AGENTS.md — read as an additional
+// project-level source alongside CHISEL.md, not instead of it: opencode,
+// Codex CLI, and Amp have all independently converged on this filename
+// as a de facto cross-tool standard for project instructions, so a repo
+// that already has one written for those tools shouldn't be silently
+// ignored just because it isn't named CHISEL.md.
+func AgentsPath(workDir string) string {
+	return filepath.Join(workDir, "AGENTS.md")
+}
+
 // Load reads the user-level and project-level memory files, if present —
-// neither existing, or a read error on either, is fine and not reported
-// as an error, matching how ~/.chisel.env is treated: this is optional
-// context, not config chisel depends on. The user-level file comes first
-// (a base layer of personal preference), the project-level file after
-// (more specific to what's being worked on right now).
+// none existing, or a read error on any of them, is fine and not
+// reported as an error, matching how ~/.chisel.env is treated: this is
+// optional context, not config chisel depends on. Layered
+// oldest/most-generic first: the user-level CHISEL.md (personal
+// preference, applies everywhere), then the project's AGENTS.md if one
+// exists (the shared, cross-tool layer), then the project's own
+// CHISEL.md (chisel-specific additions on top of whatever AGENTS.md
+// already says). foundProject is true if either project-level file was
+// found — chisel doesn't track which one specifically past that point,
+// since both feed the same system-prompt section the same way.
 func Load(workDir string) (content string, foundUser, foundProject bool) {
 	var parts []string
 
@@ -42,6 +57,13 @@ func Load(workDir string) (content string, foundUser, foundProject bool) {
 				parts = append(parts, text)
 				foundUser = true
 			}
+		}
+	}
+
+	if data, err := os.ReadFile(AgentsPath(workDir)); err == nil {
+		if text := strings.TrimSpace(string(data)); text != "" {
+			parts = append(parts, text)
+			foundProject = true
 		}
 	}
 

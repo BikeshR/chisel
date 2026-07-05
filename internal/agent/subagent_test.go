@@ -106,7 +106,7 @@ func TestRunSubagentTextOnly(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	got, usage, err := RunSubagent(context.Background(), t.TempDir(), "minimax-m3", "what is the answer?")
+	got, usage, err := RunSubagent(context.Background(), t.TempDir(), "minimax-m3", "what is the answer?", "")
 	if err != nil {
 		t.Fatalf("RunSubagent: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestRunSubagentWithToolCall(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	got, usage, err := RunSubagent(context.Background(), dir, "minimax-m3", "find the secret in notes.txt")
+	got, usage, err := RunSubagent(context.Background(), dir, "minimax-m3", "find the secret in notes.txt", "")
 	if err != nil {
 		t.Fatalf("RunSubagent: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestRunSubagentExceedsMaxTurns(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	_, _, err := RunSubagent(context.Background(), t.TempDir(), "minimax-m3", "loop forever")
+	_, _, err := RunSubagent(context.Background(), t.TempDir(), "minimax-m3", "loop forever", "")
 	if err == nil {
 		t.Fatal("expected an error when the subagent never finishes")
 	}
@@ -210,7 +210,7 @@ func TestRunLoopUsesCustomExecTool(t *testing.T) {
 		return ToolResult{ID: call.ID, Content: "custom result"}
 	}
 
-	answer, usage, err := RunLoop(context.Background(), client, []Message{{Role: "user", Content: "go"}}, 5, execTool)
+	answer, usage, err := RunLoop(context.Background(), client, []Message{{Role: "user", Content: "go"}}, 5, execTool, nil)
 	if err != nil {
 		t.Fatalf("RunLoop: %v", err)
 	}
@@ -225,6 +225,78 @@ func TestRunLoopUsesCustomExecTool(t *testing.T) {
 	}
 	if usage.InputTokens != 200 || usage.OutputTokens != 40 {
 		t.Errorf("usage = %+v, want 200/40 accumulated across both turns", usage)
+	}
+}
+
+// TestRunLoopReportsStartAndEndToOnEvent is the direct test of the
+// onEvent plumbing chisel -p -json-stream relies on (see main.go) —
+// RunSubagent itself always passes nil, so this is the only coverage
+// of onEvent actually firing.
+func TestRunLoopReportsStartAndEndToOnEvent(t *testing.T) {
+	toolCall := `[{"index":0,"id":"call_1","type":"function","function":{"name":"custom","arguments":"{}"}}]`
+	server, _ := scriptedServer(t, []string{
+		sseChunk("", "tool_calls", toolCall),
+		sseChunk("done", "stop", ""),
+	})
+	defer server.Close()
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	client := New("minimax-m3")
+	client.SetTools([]Tool{{Type: "function", Function: ToolFunction{Name: "custom"}}})
+	execTool := func(call ToolCall) ToolResult {
+		return ToolResult{ID: call.ID, Content: "custom result"}
+	}
+
+	var events []LoopEvent
+	_, _, err := RunLoop(context.Background(), client, []Message{{Role: "user", Content: "go"}}, 5, execTool, func(ev LoopEvent) {
+		events = append(events, ev)
+	})
+	if err != nil {
+		t.Fatalf("RunLoop: %v", err)
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want exactly 2 (start, end)", events)
+	}
+	if events[0] != (LoopEvent{Phase: "start", Tool: "custom"}) {
+		t.Errorf("events[0] = %+v, want a bare start event", events[0])
+	}
+	if events[1] != (LoopEvent{Phase: "end", Tool: "custom", Result: "custom result"}) {
+		t.Errorf("events[1] = %+v, want an end event carrying the tool's result", events[1])
+	}
+}
+
+// TestRunLoopReportsRejectedCallToOnEvent confirms a hallucinated call
+// (never offered in the request) still gets an end event — the
+// rejection itself is exactly the kind of thing -json-stream's
+// consumer would want visibility into, not something silently skipped.
+func TestRunLoopReportsRejectedCallToOnEvent(t *testing.T) {
+	toolCall := `[{"index":0,"id":"call_1","type":"function","function":{"name":"not_offered","arguments":"{}"}}]`
+	server, _ := scriptedServer(t, []string{
+		sseChunk("", "tool_calls", toolCall),
+		sseChunk("done", "stop", ""),
+	})
+	defer server.Close()
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	client := New("minimax-m3")
+	client.SetTools([]Tool{{Type: "function", Function: ToolFunction{Name: "custom"}}})
+
+	var events []LoopEvent
+	_, _, err := RunLoop(context.Background(), client, []Message{{Role: "user", Content: "go"}}, 5, func(ToolCall) ToolResult {
+		t.Fatal("execTool should never be called for a tool that wasn't offered")
+		return ToolResult{}
+	}, func(ev LoopEvent) {
+		events = append(events, ev)
+	})
+	if err != nil {
+		t.Fatalf("RunLoop: %v", err)
+	}
+
+	if len(events) != 2 || !events[1].IsError {
+		t.Errorf("events = %+v, want a start plus an is_error end event for the rejected call", events)
 	}
 }
 
@@ -252,7 +324,7 @@ func TestRunSubagentRejectsHallucinatedMutatingToolCall(t *testing.T) {
 	t.Setenv("CHISEL_BASE_URL", server.URL)
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
-	_, _, err := RunSubagent(context.Background(), dir, "minimax-m3", "do something")
+	_, _, err := RunSubagent(context.Background(), dir, "minimax-m3", "do something", "")
 	if err != nil {
 		t.Fatalf("RunSubagent: %v", err)
 	}
@@ -287,7 +359,7 @@ func TestRunLoopRejectsToolNotInOfferedSet(t *testing.T) {
 		return ToolResult{ID: call.ID, Content: "should never run"}
 	}
 
-	if _, _, err := RunLoop(context.Background(), client, []Message{{Role: "user", Content: "go"}}, 5, execTool); err != nil {
+	if _, _, err := RunLoop(context.Background(), client, []Message{{Role: "user", Content: "go"}}, 5, execTool, nil); err != nil {
 		t.Fatalf("RunLoop: %v", err)
 	}
 	if called {

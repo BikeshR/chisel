@@ -121,6 +121,37 @@ func (m Model) listCheckpoints() Model {
 	return m
 }
 
+// handleDiffCommand implements /diff: the cumulative diff between the
+// most recent checkpoint and the current working-directory state —
+// complementing, not replacing, the per-edit preview diffs already
+// shown in the permission prompt (colorizeDiff, shared with those).
+// Uses the same session-scoped m.checkpoints /rewind already lists,
+// not the shadow repo's full history, so this only ever compares
+// against a point reachable from *this* conversation.
+func (m Model) handleDiffCommand() Model {
+	if m.checkpointStore == nil {
+		m.appendLine(errorStyle.Render("checkpoints aren't available for this session"))
+		return m
+	}
+	if len(m.checkpoints) == 0 {
+		m.appendLine(dimStyle.Render("no checkpoints yet — one is taken automatically at the start of each turn"))
+		return m
+	}
+
+	latest := m.checkpoints[len(m.checkpoints)-1]
+	diff, err := m.checkpointStore.Diff(latest.hash)
+	if err != nil {
+		m.appendLine(errorStyle.Render("diff: " + err.Error()))
+		return m
+	}
+	if strings.TrimSpace(diff) == "" {
+		m.appendLine(dimStyle.Render(fmt.Sprintf("no changes since %q (%s)", latest.label, humanizeSince(latest.takenAt))))
+		return m
+	}
+	m.appendLine(dimStyle.Render(fmt.Sprintf("changes since %q (%s):", latest.label, humanizeSince(latest.takenAt))) + "\n" + colorizeDiff(diff))
+	return m
+}
+
 func (m Model) confirmRewind() (Model, tea.Cmd) {
 	if m.pendingRewind == nil {
 		m.appendLine(errorStyle.Render("nothing to confirm — use /rewind <n> first"))

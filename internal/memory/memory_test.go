@@ -67,6 +67,57 @@ func TestLoadUserAndProjectAreLayered(t *testing.T) {
 	}
 }
 
+// TestLoadReadsAgentsMdToo is the regression test for a real interop
+// gap: opencode, Codex CLI, and Amp all read a project's AGENTS.md, but
+// chisel — despite memory.go's own package doc already mentioning it —
+// silently ignored one if it existed with no CHISEL.md alongside it.
+func TestLoadReadsAgentsMdToo(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	if err := os.WriteFile(AgentsPath(workDir), []byte("shared instructions for every agent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	content, foundUser, foundProject := Load(workDir)
+	if foundUser {
+		t.Error("foundUser = true, want false")
+	}
+	if !foundProject {
+		t.Error("foundProject = false, want true — AGENTS.md alone should count")
+	}
+	if !strings.Contains(content, "shared instructions for every agent") {
+		t.Errorf("content = %q, want AGENTS.md's content included", content)
+	}
+}
+
+// TestLoadCombinesAgentsMdAndChiselMd confirms the two are additive
+// (companion, not exclusive fallback) — a repo can have generic
+// AGENTS.md content shared across tools plus chisel-specific additions
+// in CHISEL.md, and both should reach the system prompt.
+func TestLoadCombinesAgentsMdAndChiselMd(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	if err := os.WriteFile(AgentsPath(workDir), []byte("shared: use gofmt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ProjectPath(workDir), []byte("chisel-specific: be terse"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	content, _, foundProject := Load(workDir)
+	if !foundProject {
+		t.Fatal("foundProject = false, want true")
+	}
+	agentsIdx := strings.Index(content, "shared: use gofmt")
+	chiselIdx := strings.Index(content, "chisel-specific: be terse")
+	if agentsIdx == -1 || chiselIdx == -1 {
+		t.Fatalf("content = %q, want both files' content present", content)
+	}
+	if agentsIdx > chiselIdx {
+		t.Error("AGENTS.md (the shared, cross-tool layer) should come before CHISEL.md (chisel-specific additions)")
+	}
+}
+
 func TestLoadIgnoresEmptyFiles(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	workDir := t.TempDir()

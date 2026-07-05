@@ -2,15 +2,20 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/agentmemory"
 	"github.com/BikeshR/chisel/internal/customcmd"
 	"github.com/BikeshR/chisel/internal/gitutil"
+	"github.com/BikeshR/chisel/internal/hooks"
 	"github.com/BikeshR/chisel/internal/session"
 	"github.com/BikeshR/chisel/internal/skill"
 )
@@ -21,8 +26,8 @@ import (
 // picker.go).
 var builtinCommandNames = []string{
 	"/help", "/model", "/think", "/new", "/compact", "/retry",
-	"/git", "/plan", "/status", "/usage", "/rewind", "/queue",
-	"/sessions", "/resume",
+	"/git", "/plan", "/accept-edits", "/status", "/usage", "/rewind", "/queue",
+	"/sessions", "/resume", "/memory", "/branch", "/goal", "/context", "/diff", "/hooks",
 }
 
 // commandNames returns every "/"-command name available for the
@@ -51,26 +56,40 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 		return m.handleThinkCommand(), nil
 	case "/new":
 		return m.handleNewCommand()
+	case "/branch":
+		return m.handleBranchCommand()
 	case "/git":
 		return m.handleGitCommand(fields[1:]), nil
 	case "/compact":
 		return m.handleCompactCommand()
 	case "/plan":
 		return m.handlePlanCommand(), nil
+	case "/accept-edits":
+		return m.handleAcceptEditsCommand(), nil
 	case "/retry":
 		return m.handleRetryCommand()
 	case "/status":
 		return m.handleStatusCommand(), nil
+	case "/hooks":
+		return m.handleHooksCommand(fields[1:]), nil
 	case "/usage":
 		return m.handleUsageCommand(), nil
+	case "/context":
+		return m.handleContextCommand(), nil
 	case "/rewind":
 		return m.handleRewindCommand(fields[1:])
+	case "/diff":
+		return m.handleDiffCommand(), nil
 	case "/sessions":
 		return m.handleSessionsCommand(), nil
 	case "/resume":
 		return m.handleResumeCommand(fields[1:])
 	case "/queue":
 		return m.handleQueueCommand(fields[1:]), nil
+	case "/memory":
+		return m.handleMemoryCommand(fields[1:]), nil
+	case "/goal":
+		return m.handleGoalCommand(strings.TrimSpace(strings.TrimPrefix(text, fields[0]))), nil
 	case "/help":
 		return m.handleHelpCommand(), nil
 	default:
@@ -97,7 +116,7 @@ func (m Model) handleCustomOrUnknownCommand(text string, fields []string) (Model
 	}
 
 	args := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
-	return m.submitText(customcmd.Expand(cmd, args))
+	return m.submitTextWithHookCheck(customcmd.Expand(cmd, args))
 }
 
 // helpText is shown by /help and mirrors what handleCommand actually
@@ -106,18 +125,26 @@ const helpText = `commands:
   /help                 show this list
   /model [name]         switch to name, or open an interactive picker if no name is given
   /model check [name]   test a model through chisel's real request shape
+  /model planner [name|clear]   show/set/clear a secondary model used for plan-mode turns
   /think                toggle showing <think> blocks in full
   /new                  start a fresh session (previous one stays saved — /sessions, /resume)
+  /branch               fork this conversation into a new session, keeping the current one too
   /compact              summarize the conversation to save context
   /retry                re-send the last request after a failure
   /git auto [on|off]    toggle auto-commit after each turn
   /plan                 toggle plan mode (read-only exploration only)
+  /accept-edits         toggle accept-edits mode (file edits run without asking; bash/MCP still ask)
   /status               show workdir, session, hooks, MCP, and memory info
+  /hooks init            scaffold .chisel/hooks.json with a working lint-after-edit example
   /usage                show token/request counts since launch
+  /context              rough estimated breakdown of what's using context, by category
   /rewind [n]           list checkpoints, or restore code+conversation to checkpoint n
+  /diff                 show cumulative file changes since the last checkpoint
   /sessions             list every saved session for this directory
   /resume [n]           list sessions, or switch this conversation to session n
   /queue [clear]        list messages queued while busy, or drop them all
+  /memory [clear]       show what the model has remembered about this project, or clear it
+  /goal [text|clear]    set a standing goal to auto-continue toward after each turn, show it, or clear it
 
 keys:
   enter                 submit · in a permission prompt, only y/Y approves · while busy, queues instead
@@ -257,6 +284,44 @@ func (m Model) handleUsageCommand() Model {
 	return m
 }
 
+// charsPerTokenEstimate is a common rough heuristic for English text
+// (~4 characters per token) — used only because chisel has no real
+// tokenizer, not because it's precise. /context labels every number it
+// produces from this as an estimate; the actual total for the most
+// recent real request (server-reported, exact) is shown alongside it
+// for calibration, not folded into the same estimated figures.
+const charsPerTokenEstimate = 4
+
+// handleContextCommand implements /context: a breakdown of what's
+// actually taking up space in the request chisel would send right now,
+// by category — not a context-*window* capacity meter (chisel
+// deliberately doesn't maintain a per-model window-size table; see
+// docs/design.md) and not a substitute for /usage's authoritative,
+// server-reported totals. Useful for "what's actually eating my
+// context" the same way a du -h breakdown is useful without needing to
+// be byte-exact.
+func (m Model) handleContextCommand() Model {
+	b := m.client.PromptBreakdown()
+	transcriptChars := 0
+	for _, msg := range m.messages {
+		data, _ := json.Marshal(msg)
+		transcriptChars += len(data)
+	}
+	estimate := func(chars int) int64 { return int64(chars) / charsPerTokenEstimate }
+
+	var buf strings.Builder
+	buf.WriteString("context breakdown (rough estimate, ~4 chars/token — not an exact count):\n")
+	fmt.Fprintf(&buf, "  base instructions   ~%s tok\n", formatTokenCount(estimate(b.BaseInstructions)))
+	fmt.Fprintf(&buf, "  project memory      ~%s tok\n", formatTokenCount(estimate(b.ProjectMemory)))
+	fmt.Fprintf(&buf, "  skills              ~%s tok\n", formatTokenCount(estimate(b.Skills)))
+	fmt.Fprintf(&buf, "  tool schemas        ~%s tok\n", formatTokenCount(estimate(b.ToolSchemas)))
+	fmt.Fprintf(&buf, "  transcript          ~%s tok\n\n", formatTokenCount(estimate(transcriptChars)))
+	fmt.Fprintf(&buf, "actual total, last real request: %s tok (server-reported, exact)", formatTokenCount(m.lastContextTokens))
+
+	m.appendLine(dimStyle.Render(buf.String()))
+	return m
+}
+
 // handleThinkCommand toggles whether inline <think> blocks render in
 // full. Every assistant entry re-renders against the new setting the
 // next time the viewport refreshes (appendLine, below, does that) —
@@ -276,15 +341,167 @@ func (m Model) handleThinkCommand() Model {
 // handlePlanCommand toggles plan mode: the model is told (via the system
 // prompt) to only explore and present a plan, and any mutating tool call
 // it makes anyway is hard-denied at dispatch time regardless — see
-// dispatchNextTool in update.go. Off by default.
+// dispatchNextTool in update.go. Off by default. Switching into plan
+// mode always wins over accept-edits, same as it wins over everything
+// else decidePermission checks — they're mutually exclusive states of
+// the one underlying agent.Mode, not two independent flags.
 func (m Model) handlePlanCommand() Model {
-	m.client.SetPlanMode(!m.client.PlanMode())
-	if m.client.PlanMode() {
-		m.appendLine(dimStyle.Render("plan mode: on — read-only exploration only; /plan again to exit and allow changes"))
-	} else {
+	if m.client.Mode() == agent.ModePlan {
+		m.client.SetMode(agent.ModeNormal)
 		m.appendLine(dimStyle.Render("plan mode: off"))
+	} else {
+		m.client.SetMode(agent.ModePlan)
+		m.appendLine(dimStyle.Render("plan mode: on — read-only exploration only; /plan again to exit and allow changes"))
 	}
 	return m
+}
+
+// handleAcceptEditsCommand toggles accept-edits mode: file edits (only
+// chisel's own str_replace_based_edit_tool, still diffed in the
+// transcript, still confined to resolveInWorkDir) run without asking;
+// bash and MCP calls are entirely unaffected and still ask every time,
+// same as always — this is deliberately narrower than a general
+// auto-approve mode, since chisel has no bash sandbox (see
+// isEditCall/decidePermission in permission.go for why that
+// distinction is load-bearing, not incidental). Off by default;
+// switching into it always wins over plan mode, the same way switching
+// into plan mode wins over this.
+func (m Model) handleAcceptEditsCommand() Model {
+	if m.client.Mode() == agent.ModeAcceptEdits {
+		m.client.SetMode(agent.ModeNormal)
+		m.appendLine(dimStyle.Render("accept-edits mode: off"))
+	} else {
+		m.client.SetMode(agent.ModeAcceptEdits)
+		m.appendLine(dimStyle.Render("accept-edits mode: on — file edits run without asking; bash and MCP calls still ask every time; /accept-edits again to turn off"))
+	}
+	return m
+}
+
+// hooksInitScaffold is /hooks init's starting point — a real, working
+// example (not just a comment, since JSON has none) of the lint-after-
+// edit pattern: gofmt runs on whatever file a str_replace_based_edit_tool
+// call just touched, and its output (if any) is folded back into what
+// the model sees. Safe on a non-Go project too — gofmt errors on a
+// non-.go path, and "|| true" swallows that rather than surfacing a
+// confusing failure for a hook that's about to be edited anyway.
+const hooksInitScaffold = `{
+  "hooks": {
+    "postToolUse": [
+      {
+        "match": "str_replace_based_edit_tool",
+        "command": "gofmt -l \"$CHISEL_HOOK_PATH\" 2>/dev/null || true"
+      }
+    ]
+  }
+}
+`
+
+// handleHooksCommand implements /hooks init: chisel could already do
+// the lint-after-edit pattern several mainstream tools ship as a named
+// feature (Aider's --auto-lint) via a plain postToolUse hook — the gap
+// was discoverability, not capability, so this just writes a working
+// starting point rather than adding a new mechanism.
+func (m Model) handleHooksCommand(args []string) Model {
+	if len(args) == 0 || args[0] != "init" {
+		m.appendLine(dimStyle.Render("usage: /hooks init — scaffold .chisel/hooks.json with a working lint-after-edit example"))
+		return m
+	}
+
+	path := hooks.ConfigPath(m.workDir)
+	if _, err := os.Stat(path); err == nil {
+		m.appendLine(errorStyle.Render(".chisel/hooks.json already exists — not overwriting it"))
+		return m
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		m.appendLine(errorStyle.Render("scaffolding hooks: " + err.Error()))
+		return m
+	}
+	if err := os.WriteFile(path, []byte(hooksInitScaffold), 0o644); err != nil {
+		m.appendLine(errorStyle.Render("scaffolding hooks: " + err.Error()))
+		return m
+	}
+	m.appendLine(dimStyle.Render("wrote .chisel/hooks.json with a lint-after-edit example (postToolUse, gofmt) — edit the command for your project, then restart chisel to pick it up (you'll be asked to trust it)"))
+	return m
+}
+
+// handleMemoryCommand shows or clears the project's agent-writable
+// memory (.chisel/MEMORY.md, see internal/agentmemory and the remember
+// tool) — distinct from CHISEL.md/AGENTS.md, which /status already
+// covers: this is what the model itself has chosen to persist across
+// sessions, not what the user wrote for it to read.
+func (m Model) handleMemoryCommand(args []string) Model {
+	if len(args) == 0 {
+		content, found := agentmemory.Load(m.workDir)
+		if !found {
+			m.appendLine(dimStyle.Render("memory: nothing remembered yet in this project"))
+			return m
+		}
+		m.appendLine(dimStyle.Render("remembered about this project:\n" + content + "\n\ntype /memory clear to forget all of it"))
+		return m
+	}
+
+	if args[0] != "clear" {
+		m.appendLine(dimStyle.Render("usage: /memory [clear]"))
+		return m
+	}
+	if err := agentmemory.Clear(m.workDir); err != nil {
+		m.appendLine(errorStyle.Render("failed to clear memory: " + err.Error()))
+		return m
+	}
+	m.client.SetAgentMemory("")
+	m.appendLine(dimStyle.Render("memory cleared"))
+	return m
+}
+
+// maxGoalContinuations bounds how many times in a row chisel will
+// auto-submit a "keep going" follow-up toward /goal's standing
+// condition before stopping and waiting for the user — a runaway loop
+// that never considers the goal satisfied would otherwise keep
+// dispatching real turns (and their own tool calls, still permission-
+// gated, but each one a real request) indefinitely. Generous, not
+// tight: this is a backstop, not an expected ceiling for ordinary use.
+const maxGoalContinuations = 25
+
+// handleGoalCommand implements /goal [text|clear]. Setting or clearing
+// a goal always resets goalContinuations — a fresh goal (or none at
+// all) starts its own budget rather than inheriting whatever was left
+// from a previous one.
+func (m Model) handleGoalCommand(arg string) Model {
+	if arg == "" {
+		if m.goal == "" {
+			m.appendLine(dimStyle.Render("no goal set — /goal <text> sets one"))
+			return m
+		}
+		m.appendLine(dimStyle.Render("current goal: " + m.goal))
+		return m
+	}
+	if arg == "clear" {
+		m.goal = ""
+		m.goalContinuations = 0
+		m.appendLine(dimStyle.Render("goal cleared"))
+		return m
+	}
+	m.goal = arg
+	m.goalContinuations = 0
+	m.appendLine(dimStyle.Render("goal set: " + m.goal + " — chisel will keep going toward it after each turn instead of stopping; /goal clear to stop"))
+	return m
+}
+
+// continueTowardGoal auto-submits a "keep going" follow-up toward the
+// standing /goal, the same path a real typed message takes
+// (submitText) — every tool call it leads to still goes through the
+// normal permission gate exactly like any other turn; this only
+// automates the re-prompting between turns. Returns a nil Cmd once
+// maxGoalContinuations is hit, so the caller falls back to its normal
+// idle handling instead of continuing indefinitely.
+func (m Model) continueTowardGoal() (Model, tea.Cmd) {
+	if m.goalContinuations >= maxGoalContinuations {
+		m.appendLine(dimStyle.Render(fmt.Sprintf("goal continuation limit reached (%d) — /goal to check it, /goal clear to stop, or just tell me to keep going", maxGoalContinuations)))
+		m.goal = ""
+		return m, nil
+	}
+	m.goalContinuations++
+	return m.submitTextWithHookCheck("Continue working toward this goal: " + m.goal)
 }
 
 // handleNewCommand abandons the current transcript in memory and starts
@@ -318,6 +535,22 @@ func (m Model) handleNewCommand() (Model, tea.Cmd) {
 	m.viewport.SetContent("")
 	m.recomputeViewportHeight()
 	m.appendLine(dimStyle.Render("started a new session — the previous one is still saved; /sessions lists it, /resume <n> switches back"))
+	return m, saveSession(m.workDir, m.sessionID, m.messages)
+}
+
+// handleBranchCommand forks the current conversation into a new,
+// independently resumable session — unlike /new (abandons the current
+// thread for a blank one) or /resume (switches to an already-saved
+// one), /branch lets you try a different approach without losing
+// either: the original session's file is untouched (chisel already
+// saves after every turn, so it's already durable as of right before
+// this), and this live conversation continues from here under a fresh
+// session id. Deliberately doesn't reset messages/entries/todos/
+// checkpoints the way /new does — that's the entire point, the fork
+// starts as an exact copy of what's already here, not a blank slate.
+func (m Model) handleBranchCommand() (Model, tea.Cmd) {
+	m.sessionID = session.NewID()
+	m.appendLine(dimStyle.Render("branched into a new session — the original is still saved under its own id; /sessions lists it, /resume switches back"))
 	return m, saveSession(m.workDir, m.sessionID, m.messages)
 }
 
@@ -416,10 +649,42 @@ func (m Model) handleModelCommand(args []string) (Model, tea.Cmd) {
 		return m, checkModel(m.newTurnContext(), m.client, target)
 	}
 
+	if args[0] == "planner" {
+		return m.handleModelPlannerCommand(args[1:]), nil
+	}
+
 	name := args[0]
 	m.client.SetModel(name)
 	m.appendLine(dimStyle.Render("switched to " + name))
 	return m, nil
+}
+
+// handleModelPlannerCommand implements /model planner [name|clear] — a
+// secondary model used instead of the primary one for requests sent
+// while in plan mode (see agent.Client.EffectiveModelName), mirroring
+// Goose's GOOSE_PLANNER_MODEL and Aider's architect/editor split: a
+// cheaper/faster model can handle exploration-and-propose turns while
+// the primary model does the real work, using two model IDs from the
+// one provider chisel already talks to, not a second provider. Also
+// settable at startup via CHISEL_PLANNER_MODEL — this changes it for
+// the rest of the current session, same as /model does for the primary.
+func (m Model) handleModelPlannerCommand(args []string) Model {
+	if len(args) == 0 {
+		if p := m.client.PlannerModel(); p != "" {
+			m.appendLine(dimStyle.Render(fmt.Sprintf("planner model: %s (used instead of %s for plan-mode turns)", p, m.client.ModelName())))
+		} else {
+			m.appendLine(dimStyle.Render(fmt.Sprintf("no planner model set — plan mode uses %s, same as everything else; /model planner <name> sets one", m.client.ModelName())))
+		}
+		return m
+	}
+	if args[0] == "clear" {
+		m.client.SetPlannerModel("")
+		m.appendLine(dimStyle.Render("planner model cleared — plan mode will use " + m.client.ModelName()))
+		return m
+	}
+	m.client.SetPlannerModel(args[0])
+	m.appendLine(dimStyle.Render(fmt.Sprintf("planner model set: %s — used instead of %s for plan-mode turns", args[0], m.client.ModelName())))
+	return m
 }
 
 // checkModel sends a minimal request to name through chisel's real request

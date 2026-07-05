@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/BikeshR/chisel/internal/skill"
+	"github.com/BikeshR/chisel/internal/subagentdef"
 )
 
 const systemPrompt = `You are chisel, a terminal coding agent running in the user's project directory.
@@ -39,16 +40,47 @@ You are currently in PLAN MODE. Only use read-only exploration — viewing files
 
 const defaultBaseURL = "https://opencode.ai/zen/go"
 
+// Mode is the client's current operating mode — normal (every mutating
+// call needs confirmation), accept-edits (file edits run without
+// asking; bash and MCP calls still always ask), or plan (nothing
+// mutating runs at all, hard-enforced at dispatch — see
+// internal/tui/permission.go's decidePermission, the single place all
+// three modes are actually acted on). A three-way enum rather than
+// plan mode's original plain bool specifically so accept-edits could be
+// added without a second, independent flag that would need its own
+// interaction rules against plan mode (can't both be on at once).
+type Mode int
+
+const (
+	ModeNormal Mode = iota
+	ModeAcceptEdits
+	ModePlan
+)
+
 // Client sends conversation turns to a single OpenCode Go model with
 // chisel's fixed tool set.
 type Client struct {
-	http     *http.Client
-	baseURL  string
-	apiKey   string
-	model    string
-	tools    []Tool
-	planMode bool
-	memory   string
+	http    *http.Client
+	baseURL string
+	apiKey  string
+	model   string
+	tools   []Tool
+	mode    Mode
+	memory  string
+	// plannerModel, if set, replaces model for requests sent while in
+	// ModePlan — mirrors Goose's GOOSE_PLANNER_MODEL and Aider's
+	// architect/editor split: a cheaper/faster model can handle
+	// exploration-and-propose turns while the primary model does the
+	// real work, using two model IDs from the one provider chisel
+	// already talks to, not a second provider abstraction. Empty means
+	// no split configured — plan mode just uses model, as it always did.
+	plannerModel string
+	// agentMemory is the project's .chisel/MEMORY.md content (see
+	// internal/agentmemory) — notes the model wrote to itself via the
+	// remember tool in a past session, kept in its own system-prompt
+	// section distinct from memory (user-authored CHISEL.md/AGENTS.md)
+	// so it's clear which is which.
+	agentMemory string
 	// skillsPrompt is the pre-formatted "available skills" section built
 	// by SetSkills — just names and descriptions, never full skill
 	// content, which stays out of every request until load_skill is
@@ -102,6 +134,32 @@ func (c *Client) SetModel(model string) {
 	c.model = model
 }
 
+// SetPlannerModel sets (or, with "", clears) the model used instead of
+// ModelName while in ModePlan — see plannerModel's own doc comment.
+func (c *Client) SetPlannerModel(model string) {
+	c.plannerModel = model
+}
+
+// PlannerModel returns the configured planner model, or "" if none is set.
+func (c *Client) PlannerModel() string {
+	return c.plannerModel
+}
+
+// EffectiveModelName returns whichever model a request sent right now
+// would actually use — plannerModel while in ModePlan (if one is
+// configured), ModelName otherwise. Callers that care what's actually
+// about to run (the status bar, dispatch_subagent picking a model for
+// its child) should use this; callers that specifically mean "the
+// primary model" regardless of mode (the /model picker's own
+// current-selection marker, /model itself switching it) should keep
+// using ModelName.
+func (c *Client) EffectiveModelName() string {
+	if c.mode == ModePlan && c.plannerModel != "" {
+		return c.plannerModel
+	}
+	return c.model
+}
+
 // AddTools appends to the tool set sent with every request — for tools
 // discovered at runtime (MCP servers) rather than chisel's fixed built-in
 // set from buildTools.
@@ -147,29 +205,51 @@ func (c *Client) RemoveToolsWithPrefix(prefix string) {
 	c.tools = kept
 }
 
-// SetPlanMode toggles plan mode, which appends planModeNote to the system
-// prompt sent with every request from here on.
-func (c *Client) SetPlanMode(enabled bool) {
-	c.planMode = enabled
+// SetMode changes the client's operating mode outright — see Mode's own
+// doc comment for what each value means.
+func (c *Client) SetMode(m Mode) {
+	c.mode = m
 }
 
-// PlanMode reports whether plan mode is currently on.
+// Mode reports the client's current operating mode.
+func (c *Client) Mode() Mode {
+	return c.mode
+}
+
+// SetPlanMode and PlanMode predate the three-way Mode enum and are kept
+// as convenience wrappers for the many callers (and tests) that only
+// ever cared about the plan/not-plan distinction specifically, not
+// accept-edits. SetPlanMode(false) only steps back to ModeNormal if
+// plan mode was actually what was on — it must not clobber
+// ModeAcceptEdits if that's somehow what's active when it's called
+// (today nothing does that, but "false" meaning "whatever the mode
+// was, un-plan it" is the only sane reading once a third mode exists).
+func (c *Client) SetPlanMode(enabled bool) {
+	if enabled {
+		c.mode = ModePlan
+	} else if c.mode == ModePlan {
+		c.mode = ModeNormal
+	}
+}
+
+// PlanMode reports whether plan mode specifically is currently on.
 func (c *Client) PlanMode() bool {
-	return c.planMode
+	return c.mode == ModePlan
 }
 
 // Clone returns a copy of c for model — same tools (including any added
-// via AddTools) and memory, but not plan mode, since a clone's only
-// current use (checkModel, for /model check) is a one-off "does this
-// model even work" probe, not a real turn where plan mode would matter.
-// Exists so /model check tests a candidate model through chisel's real
-// request shape instead of a bare client with none of that context —
-// the same class of failure (a provider rejecting the tool set
-// outright) can differ once MCP servers are actually configured.
+// via AddTools) and memory, but always ModeNormal regardless of what
+// mode c is actually in, since a clone's only current use (checkModel,
+// for /model check) is a one-off "does this model even work" probe, not
+// a real turn where the mode would matter. Exists so /model check tests
+// a candidate model through chisel's real request shape instead of a
+// bare client with none of that context — the same class of failure (a
+// provider rejecting the tool set outright) can differ once MCP servers
+// are actually configured.
 func (c *Client) Clone(model string) *Client {
 	clone := *c
 	clone.model = model
-	clone.planMode = false
+	clone.mode = ModeNormal
 	return &clone
 }
 
@@ -186,11 +266,22 @@ func (c *Client) WithoutTools() *Client {
 	return &clone
 }
 
-// SetMemory sets the CHISEL.md content (see internal/memory) appended to
-// the system prompt sent with every request from here on. Pass "" to
-// clear it.
+// SetMemory sets the CHISEL.md/AGENTS.md content (see internal/memory)
+// appended to the system prompt sent with every request from here on.
+// Pass "" to clear it.
 func (c *Client) SetMemory(text string) {
 	c.memory = text
+}
+
+// SetAgentMemory sets the project's .chisel/MEMORY.md content (see
+// internal/agentmemory) — notes the model persisted to itself in a past
+// session via the remember tool, appended to the system prompt in its
+// own section, separate from memory. Pass "" to clear it. Unlike
+// memory, this is also the tool's own load-bearing state: /memory clear
+// calls this with "" after deleting the file, so a live session doesn't
+// keep sending stale content the model itself asked to forget.
+func (c *Client) SetAgentMemory(text string) {
+	c.agentMemory = text
 }
 
 // SetSkills tells the model what skills (see internal/skill) are
@@ -220,6 +311,28 @@ func (c *Client) SetSkills(skills map[string]skill.Skill) {
 	c.AddTools([]Tool{loadSkillTool()})
 }
 
+// SetSubagents tells the model what custom subagent roles (see
+// internal/subagentdef) are available — folded into dispatch_subagent's
+// own tool schema (an "agent" enum plus each role's description), not a
+// separate tool or system-prompt section, since dispatch_subagent
+// itself is the only thing a role selection actually affects. A no-op
+// for an empty map — dispatch_subagent keeps its original,
+// single-role schema. Doesn't change what any subagent can actually
+// do: every custom role still runs with exactly subagentTools() (see
+// runDispatchSubagent), a definition only supplies a prompt layered on
+// top of the task, never a different tool set.
+func (c *Client) SetSubagents(subagents map[string]subagentdef.Subagent) {
+	if len(subagents) == 0 {
+		return
+	}
+	for i, t := range c.tools {
+		if t.Function.Name == "dispatch_subagent" {
+			c.tools[i] = subagentDispatchTool(subagents)
+			return
+		}
+	}
+}
+
 type chatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
@@ -233,20 +346,10 @@ type chatRequest struct {
 // (status code, connection) is validated before this returns — only
 // decode-time failures arrive over the channel.
 func (c *Client) SendStreaming(ctx context.Context, history []Message) (<-chan Event, error) {
-	prompt := systemPrompt
-	if c.planMode {
-		prompt += planModeNote
-	}
-	if c.memory != "" {
-		prompt += "\n\n---\n\nProject and user instructions:\n\n" + c.memory
-	}
-	if c.skillsPrompt != "" {
-		prompt += "\n\n---\n\n" + c.skillsPrompt
-	}
-	messages := append([]Message{{Role: "system", Content: prompt}}, history...)
+	messages := append([]Message{{Role: "system", Content: c.systemPromptSections().full()}}, history...)
 
 	body, err := json.Marshal(chatRequest{
-		Model:    c.model,
+		Model:    c.EffectiveModelName(),
 		Messages: messages,
 		Tools:    c.tools,
 		Stream:   true,

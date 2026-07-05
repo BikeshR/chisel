@@ -353,6 +353,67 @@ func TestCheckpointEmptyLabelFallsBack(t *testing.T) {
 	}
 }
 
+func TestDiffShowsChangesSinceCheckpoint(t *testing.T) {
+	s, workDir := newTestStore(t)
+	writeFile(t, workDir, "a.txt", "version 1\n")
+	hash, err := s.Checkpoint("first checkpoint")
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+
+	writeFile(t, workDir, "a.txt", "version 2\n")
+
+	diff, err := s.Diff(hash)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if !strings.Contains(diff, "-version 1") || !strings.Contains(diff, "+version 2") {
+		t.Errorf("diff = %q, want it to show the actual content change", diff)
+	}
+}
+
+func TestDiffEmptyWhenNothingChanged(t *testing.T) {
+	s, workDir := newTestStore(t)
+	writeFile(t, workDir, "a.txt", "unchanged content\n")
+	hash, err := s.Checkpoint("checkpoint")
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+
+	diff, err := s.Diff(hash)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if strings.TrimSpace(diff) != "" {
+		t.Errorf("diff = %q, want empty when nothing changed since the checkpoint", diff)
+	}
+}
+
+// TestDiffDoesNotModifyFiles confirms Diff is read-only — unlike
+// Restore, which is documented as destructive, Diff must never touch
+// the working tree.
+func TestDiffDoesNotModifyFiles(t *testing.T) {
+	s, workDir := newTestStore(t)
+	writeFile(t, workDir, "a.txt", "version 1\n")
+	hash, err := s.Checkpoint("first checkpoint")
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	writeFile(t, workDir, "a.txt", "version 2\n")
+
+	if _, err := s.Diff(hash); err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(workDir, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "version 2\n" {
+		t.Errorf("a.txt = %q, want it unchanged by Diff", string(data))
+	}
+}
+
 // TestPruneStaleReposRemovesOldRepoNotFreshOne is the regression test
 // for a real disk-usage gap: sessions get age-based pruning and a
 // project's own checkpoint history is capped by commit count, but a

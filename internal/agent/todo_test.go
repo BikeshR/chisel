@@ -59,7 +59,7 @@ func TestSummarizeUpdateTodos(t *testing.T) {
 
 func TestExecuteUpdateTodos(t *testing.T) {
 	call := ToolCall{ID: "call_1", Function: ToolCallFunction{Name: "update_todos", Arguments: `{"todos":[{"content":"x","status":"pending"}]}`}}
-	result := Execute(context.Background(), t.TempDir(), "minimax-m3", call, nil, nil)
+	result := Execute(context.Background(), t.TempDir(), "minimax-m3", call, nil, nil, nil)
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content)
 	}

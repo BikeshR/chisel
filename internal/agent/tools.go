@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/BikeshR/chisel/internal/skill"
+	"github.com/BikeshR/chisel/internal/subagentdef"
 )
 
 // ToolCall is one function call the model made — the same shape whether
@@ -113,9 +114,13 @@ func Summarize(call ToolCall) string {
 		return fmt.Sprintf("%s %s", in.Command, in.Path)
 	case "dispatch_subagent":
 		var in struct {
-			Task string `json:"task"`
+			Task  string `json:"task"`
+			Agent string `json:"agent"`
 		}
 		_ = json.Unmarshal(call.input(), &in)
+		if in.Agent != "" {
+			return fmt.Sprintf("subagent (%s): %s", in.Agent, in.Task)
+		}
 		return "subagent: " + in.Task
 	case "update_todos":
 		var in struct {
@@ -129,6 +134,12 @@ func Summarize(call ToolCall) string {
 		}
 		_ = json.Unmarshal(call.input(), &in)
 		return "load skill: " + in.Name
+	case "remember":
+		var in struct {
+			Note string `json:"note"`
+		}
+		_ = json.Unmarshal(call.input(), &in)
+		return "remember: " + in.Note
 	default:
 		return call.Function.Name
 	}
@@ -142,7 +153,12 @@ func Summarize(call ToolCall) string {
 // model as the parent. skills is only used by load_skill — nil is only
 // valid if no skills were loaded (skill.Load never returns nil, so in
 // practice this is only nil in tests that don't care about load_skill).
-func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *BashSession, skills map[string]skill.Skill) ToolResult {
+// subagents is only used by dispatch_subagent, to resolve its optional
+// "agent" role name — nil is only valid if no custom subagents were
+// loaded, or the caller's own tool set never offers dispatch_subagent
+// at all (a spawned subagent's own execTool closure always passes nil
+// here, since subagentTools() never includes dispatch_subagent).
+func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *BashSession, skills map[string]skill.Skill, subagents map[string]subagentdef.Subagent) ToolResult {
 	var content string
 	var usage Usage
 	var err error
@@ -159,11 +175,13 @@ func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *Ba
 	case "view":
 		content, err = runView(workDir, call.input())
 	case "dispatch_subagent":
-		content, usage, err = runDispatchSubagent(ctx, workDir, model, call.input())
+		content, usage, err = runDispatchSubagent(ctx, workDir, model, call.input(), subagents)
 	case "update_todos":
 		content, err = runUpdateTodos(call.input())
 	case "load_skill":
 		content, err = runLoadSkill(skills, call.input())
+	case "remember":
+		content, err = runRemember(workDir, call.input())
 	default:
 		err = fmt.Errorf("unknown tool %q", call.Function.Name)
 	}

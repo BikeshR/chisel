@@ -19,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/agentmemory"
 	"github.com/BikeshR/chisel/internal/checkpoint"
 	"github.com/BikeshR/chisel/internal/customcmd"
 	"github.com/BikeshR/chisel/internal/hooks"
@@ -27,6 +28,7 @@ import (
 	"github.com/BikeshR/chisel/internal/permrules"
 	"github.com/BikeshR/chisel/internal/session"
 	"github.com/BikeshR/chisel/internal/skill"
+	"github.com/BikeshR/chisel/internal/subagentdef"
 	"github.com/BikeshR/chisel/internal/tui"
 )
 
@@ -46,6 +48,7 @@ func main() {
 
 	prompt := flag.String("p", "", "run non-interactively: send this prompt, print the final answer, and exit — read-only tools only (no bash, no edits, no MCP), since there's no terminal here to show a permission prompt to. Piped stdin (e.g. 'git diff | chisel -p \"review this\"') is appended to the prompt. Put -p last (or use -p=\"...\"): being a string flag, it otherwise swallows the next flag as its own value")
 	jsonOutput := flag.Bool("json", false, "with -p, emit a single JSON object (answer, usage, error) to stdout instead of plain text — for scripts and CI")
+	jsonStream := flag.Bool("json-stream", false, "with -p, emit NDJSON (one JSON object per line: a tool_call line as each one starts/finishes, then a final result line) instead of a single blob or plain text — for scripts that want to show progress on a long-running prompt. Takes precedence over -json if both are set")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 
@@ -54,11 +57,20 @@ func main() {
 		return
 	}
 
-	// -json only changes headless (-p) output — silently doing nothing
-	// with it otherwise (the previous behavior) left no indication the
-	// flag was even noticed, let alone why it had no effect.
-	if *jsonOutput && *prompt == "" {
-		fmt.Fprintln(os.Stderr, "chisel: -json has no effect without -p — ignoring")
+	// -json/-json-stream only change headless (-p) output — silently
+	// doing nothing with them otherwise (the previous behavior for
+	// -json) left no indication the flag was even noticed, let alone
+	// why it had no effect.
+	if (*jsonOutput || *jsonStream) && *prompt == "" {
+		fmt.Fprintln(os.Stderr, "chisel: -json/-json-stream have no effect without -p — ignoring")
+	}
+
+	outputMode := headlessText
+	switch {
+	case *jsonStream:
+		outputMode = headlessJSONStream
+	case *jsonOutput:
+		outputMode = headlessJSON
 	}
 
 	// Checked here, not left to surface as the first request's raw 401 —
@@ -86,11 +98,14 @@ func main() {
 			fmt.Fprintln(os.Stderr, "chisel: reading piped stdin:", err)
 			os.Exit(1)
 		}
-		runHeadless(workDir, model, *prompt+piped, *jsonOutput)
+		runHeadless(workDir, model, *prompt+piped, outputMode)
 		return
 	}
 
 	client := agent.New(model)
+	if plannerModel := os.Getenv("CHISEL_PLANNER_MODEL"); plannerModel != "" {
+		client.SetPlannerModel(plannerModel)
+	}
 	bash := agent.NewBashSession(workDir)
 	defer bash.Close()
 
@@ -142,6 +157,9 @@ func main() {
 	if memContent != "" {
 		client.SetMemory(memContent)
 	}
+	if agentMemContent, found := agentmemory.Load(workDir); found {
+		client.SetAgentMemory(agentMemContent)
+	}
 
 	resumed, savedAt, sessionID, _, sessionLoadFailed := session.LoadLatest(workDir)
 	if sessionID == "" {
@@ -175,7 +193,15 @@ func main() {
 	}
 	skills := skill.Load(workDir)
 	client.SetSkills(skills)
-	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, memUser, memProject, customCommands, checkpointStore, skills, permRules, resumed, savedAt, sessionLoadFailed, sessionID)
+	subagents := subagentdef.Load(workDir)
+	client.SetSubagents(subagents)
+
+	sessionStartOutput, err := hooks.RunSessionStart(context.Background(), workDir, hooksCfg.Hooks.SessionStart)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: sessionStart hook:", err)
+	}
+
+	tuiModel := tui.New(client, workDir, bash, mcpRegistry, hooksCfg, memUser, memProject, customCommands, checkpointStore, skills, subagents, permRules, resumed, savedAt, sessionLoadFailed, sessionID, sessionStartOutput)
 
 	finalModel, err := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	// A still-running bash_background command has its own context,
@@ -183,6 +209,14 @@ func main() {
 	// when chisel exits, so this is the one place that does.
 	if m, ok := finalModel.(tui.Model); ok {
 		m.CancelBackgroundTasks()
+	}
+	// Runs after the alt-screen program has already exited, so any
+	// stderr output from a misbehaving hook is actually visible —
+	// there's no terminal to show anything to while the TUI still owns
+	// the screen. Best-effort like every other hook call: a SessionEnd
+	// hook failing shouldn't block chisel from actually exiting.
+	if err := hooks.RunSessionEnd(context.Background(), workDir, hooksCfg.Hooks.SessionEnd); err != nil {
+		fmt.Fprintln(os.Stderr, "chisel: sessionEnd hook:", err)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "chisel:", err)
@@ -219,6 +253,65 @@ type headlessUsage struct {
 // calling os.Exit.
 func formatHeadlessJSON(answer string, usage agent.Usage, runErr error) (string, error) {
 	result := headlessResult{
+		Answer: answer,
+		Usage:  headlessUsage{InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens},
+	}
+	if runErr != nil {
+		result.Error = runErr.Error()
+	}
+	data, err := json.Marshal(result)
+	return string(data), err
+}
+
+// headlessOutputMode selects what chisel -p actually prints — plain
+// text (the default), a single headlessResult JSON blob (-json), or
+// NDJSON progress-plus-result (-json-stream). A small enum rather than
+// two independent bools specifically so the two JSON modes can't both
+// be "on" at once with no defined precedence between them.
+type headlessOutputMode int
+
+const (
+	headlessText headlessOutputMode = iota
+	headlessJSON
+	headlessJSONStream
+)
+
+// ndjsonToolCallEvent is one line of chisel -p -json-stream's output
+// reporting a tool call starting or finishing — see formatNDJSONToolCall.
+type ndjsonToolCallEvent struct {
+	Type    string `json:"type"` // always "tool_call"
+	Phase   string `json:"phase"`
+	Tool    string `json:"tool"`
+	Result  string `json:"result,omitempty"`
+	IsError bool   `json:"is_error,omitempty"`
+}
+
+// ndjsonResultEvent is -json-stream's final line — the same content
+// headlessResult carries for plain -json, with an explicit Type so a
+// line-oriented NDJSON parser can tell it apart from a tool_call line
+// without needing to already know it's the last one.
+type ndjsonResultEvent struct {
+	Type   string        `json:"type"` // always "result"
+	Answer string        `json:"answer,omitempty"`
+	Usage  headlessUsage `json:"usage"`
+	Error  string        `json:"error,omitempty"`
+}
+
+// formatNDJSONToolCall builds one -json-stream progress line from a
+// LoopEvent — pulled out as its own pure function for the same testing
+// reason formatHeadlessJSON is.
+func formatNDJSONToolCall(ev agent.LoopEvent) (string, error) {
+	data, err := json.Marshal(ndjsonToolCallEvent{
+		Type: "tool_call", Phase: ev.Phase, Tool: ev.Tool, Result: ev.Result, IsError: ev.IsError,
+	})
+	return string(data), err
+}
+
+// formatNDJSONResult builds -json-stream's final line — formatHeadlessJSON's
+// counterpart, just with an explicit "type" discriminator added.
+func formatNDJSONResult(answer string, usage agent.Usage, runErr error) (string, error) {
+	result := ndjsonResultEvent{
+		Type:   "result",
 		Answer: answer,
 		Usage:  headlessUsage{InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens},
 	}
@@ -270,10 +363,40 @@ func readPipedInput(r *os.File) (string, error) {
 	return fmt.Sprintf("\n\n--- piped stdin ---\n%s\n--- end piped stdin ---\n", data), nil
 }
 
-func runHeadless(workDir, model, prompt string, jsonOutput bool) {
-	answer, usage, err := runHeadlessCore(workDir, model, prompt)
+func runHeadless(workDir, model, prompt string, mode headlessOutputMode) {
+	var onEvent func(agent.LoopEvent)
+	if mode == headlessJSONStream {
+		onEvent = func(ev agent.LoopEvent) {
+			line, err := formatNDJSONToolCall(ev)
+			if err != nil {
+				// Same reasoning as the marshal-failure checks below:
+				// content here is plain strings/bools, so this should
+				// never actually happen, but a silently dropped line
+				// would be a worse failure mode for a line-oriented
+				// parser than a clear stderr message.
+				fmt.Fprintln(os.Stderr, "chisel: marshal tool_call event:", err)
+				return
+			}
+			fmt.Println(line)
+		}
+	}
 
-	if jsonOutput {
+	answer, usage, err := runHeadlessCore(workDir, model, prompt, onEvent)
+
+	switch mode {
+	case headlessJSONStream:
+		line, marshalErr := formatNDJSONResult(answer, usage, err)
+		if marshalErr != nil {
+			fmt.Fprintln(os.Stderr, "chisel: marshal headless result:", marshalErr)
+			os.Exit(1)
+		}
+		fmt.Println(line)
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+
+	case headlessJSON:
 		line, marshalErr := formatHeadlessJSON(answer, usage, err)
 		if marshalErr != nil {
 			// Content is plain strings and int64s — this should never
@@ -303,20 +426,24 @@ func runHeadless(workDir, model, prompt string, jsonOutput bool) {
 // in the first place; the same guarantee a subagent's tool set gives,
 // reused via the same agent.RunLoop. Hooks aren't loaded either — the
 // interactive trust prompt they'd otherwise need doesn't make sense in
-// a non-interactive invocation.
-func runHeadlessCore(workDir, model, prompt string) (string, agent.Usage, error) {
+// a non-interactive invocation. onEvent is forwarded straight to
+// RunLoop — nil unless -json-stream asked for NDJSON progress output.
+func runHeadlessCore(workDir, model, prompt string, onEvent func(agent.LoopEvent)) (string, agent.Usage, error) {
 	client := agent.New(model)
 	client.SetTools(agent.ReadOnlyTools())
 
 	if memContent, _, _ := memory.Load(workDir); memContent != "" {
 		client.SetMemory(memContent)
 	}
+	if agentMemContent, found := agentmemory.Load(workDir); found {
+		client.SetAgentMemory(agentMemContent)
+	}
 
 	ctx := context.Background()
 	history := []agent.Message{{Role: "user", Content: prompt}}
 	return agent.RunLoop(ctx, client, history, maxHeadlessTurns, func(call agent.ToolCall) agent.ToolResult {
-		return agent.Execute(ctx, workDir, model, call, nil, nil)
-	})
+		return agent.Execute(ctx, workDir, model, call, nil, nil, nil)
+	}, onEvent)
 }
 
 // maybeAddGopls auto-detects a Go project (a go.mod in workDir) with
@@ -409,8 +536,8 @@ func confirmHooksTrustFrom(workDir string, in io.Reader) bool {
 	// config doesn't even parse, fall back to the generic message;
 	// LoadConfig reports the real parse error later regardless.
 	var hooksCfgPreview hooks.Config
-	if err := json.Unmarshal(data, &hooksCfgPreview); err != nil || (len(hooksCfgPreview.Hooks.PreToolUse) == 0 && len(hooksCfgPreview.Hooks.PostToolUse) == 0) {
-		fmt.Printf("chisel: %s configures hooks — shell commands that run automatically on tool calls, some of which (glob, grep) normally need no confirmation at all.\n", path)
+	if err := json.Unmarshal(data, &hooksCfgPreview); err != nil || !hooksCfgPreview.HasAny() {
+		fmt.Printf("chisel: %s configures hooks — shell commands that run automatically on tool calls, submitted messages, or session start/end, some of which (glob, grep) normally need no confirmation at all.\n", path)
 	} else {
 		fmt.Printf("chisel: %s configures these hooks:\n", path)
 		for _, h := range hooksCfgPreview.Hooks.PreToolUse {
@@ -418,6 +545,15 @@ func confirmHooksTrustFrom(workDir string, in io.Reader) bool {
 		}
 		for _, h := range hooksCfgPreview.Hooks.PostToolUse {
 			fmt.Printf("  postToolUse %s: %s\n", h.Match, h.Command)
+		}
+		for _, h := range hooksCfgPreview.Hooks.SessionStart {
+			fmt.Printf("  sessionStart: %s\n", h.Command)
+		}
+		for _, h := range hooksCfgPreview.Hooks.SessionEnd {
+			fmt.Printf("  sessionEnd: %s\n", h.Command)
+		}
+		for _, h := range hooksCfgPreview.Hooks.UserPromptSubmit {
+			fmt.Printf("  userPromptSubmit: %s\n", h.Command)
 		}
 	}
 	fmt.Print("Trust and run them for this project? [y/N] ")

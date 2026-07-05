@@ -63,6 +63,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case compactResultMsg:
 		return m.handleCompactResult(msg)
 
+	case userPromptHookResultMsg:
+		return m.handleUserPromptHookResult(msg)
+
 	case sessionSaveErrorMsg:
 		m.appendLine(errorStyle.Render("session save failed: " + msg.err.Error()))
 		return m, nil
@@ -156,7 +159,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			call := m.pendingUses[0]
 			m.startBusy(stateExecutingTool)
 			m.appendLine(dimStyle.Render("  → approved"))
-			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, m.skills, call)
+			return m, executeTool(m.newTurnContext(), m.workDir, m.client.EffectiveModelName(), m.bash, m.mcp, m.hooks, m.skills, m.subagents, call)
 		case "a", "A":
 			call := m.pendingUses[0]
 			// A doom-loop-forced prompt never offers "a" (see
@@ -173,7 +176,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.startBusy(stateExecutingTool)
 			m.appendLine(dimStyle.Render("  → approved (always allow for this session)"))
-			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, m.skills, call)
+			return m, executeTool(m.newTurnContext(), m.workDir, m.client.EffectiveModelName(), m.bash, m.mcp, m.hooks, m.skills, m.subagents, call)
 		case "p", "P":
 			// Same doom-loop guard as "a" — a forced confirmation never
 			// offers this option (see dispatchNextTool), but the key
@@ -215,7 +218,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.appendLine(dimStyle.Render("  → approved"))
 			}
 			m.startBusy(stateExecutingTool)
-			return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, m.skills, call)
+			return m, executeTool(m.newTurnContext(), m.workDir, m.client.EffectiveModelName(), m.bash, m.mcp, m.hooks, m.skills, m.subagents, call)
 		case "n", "N":
 			// Denying isn't a dead end: rather than immediately resending
 			// a canned "denied" message and letting the model guess why,
@@ -503,6 +506,12 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSuffix(m.textArea.Value(), "\n")
 	m.textArea.Reset()
 
+	// A real, keystroke-driven submission is the user actively steering
+	// — reset the goal auto-continuation count so a fresh run of
+	// continuations gets the full budget again, rather than counting
+	// against whatever was left over from before they typed anything.
+	m.goalContinuations = 0
+
 	// A denial from the permission prompt is waiting on a reason (or an
 	// explicit "no reason" via an empty submission) — resolve it here
 	// rather than treating this as a fresh message, regardless of
@@ -560,7 +569,7 @@ func (m Model) dispatchText(text string) (Model, tea.Cmd) {
 	if strings.HasPrefix(text, "!") {
 		return m.runBang(strings.TrimPrefix(text, "!"))
 	}
-	return m.submitText(text)
+	return m.submitTextWithHookCheck(text)
 }
 
 // submitText sends text as a new user message and starts the model's
@@ -746,8 +755,22 @@ func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage, finis
 		// the notification would be just as misleading there.
 		queued := m.dequeueOrSubmit()
 		autoCompacting := queued == nil && m.lastContextTokens >= contextWarnThreshold
+
+		// A standing /goal auto-continues the same way a queued message
+		// does, and for the same reason it's skipped when one exists:
+		// the user's own queued message is the stronger, more specific
+		// signal. Checked after autoCompacting too — compacting first,
+		// then continuing on the turn after, is better than continuing
+		// against a context that's already flagged as too large.
+		var goalCmd tea.Cmd
+		if queued == nil && !autoCompacting && m.goal != "" {
+			updated, cmd := m.continueTowardGoal()
+			m = updated
+			goalCmd = cmd
+		}
+
 		var notify tea.Cmd
-		if queued == nil && !autoCompacting {
+		if queued == nil && !autoCompacting && goalCmd == nil {
 			notify = notifyIdle("chisel is done")
 		}
 
@@ -771,7 +794,7 @@ func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage, finis
 			return m, tea.Batch(save, notify, autoCommitCmd, gitStatus, compact(m.newTurnContext(), m.client, m.messages))
 		}
 
-		return m, tea.Batch(save, notify, queued, autoCommitCmd, gitStatus)
+		return m, tea.Batch(save, notify, queued, autoCommitCmd, gitStatus, goalCmd)
 	}
 
 	// Deliberately not saving here: resp (just appended above) carries
@@ -807,7 +830,7 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	}
 	looping := m.toolCallRepeatCount >= doomLoopThreshold
 
-	decision, reason := decidePermission(call, m.client.PlanMode(), m.sessionAllowlist, m.permRules)
+	decision, reason := decidePermission(call, m.client.Mode(), m.sessionAllowlist, m.permRules)
 	// A call that would otherwise run without asking (auto-allowed by
 	// default, or already on the "always allow" list) still gets
 	// escalated to a confirmation once it's repeated identically this
@@ -860,7 +883,7 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	default: // permissionAllow
 		m.startBusy(stateExecutingTool)
 		m.appendLine(toolStyle.Render("  " + summarizeCall(call)))
-		return m, executeTool(m.newTurnContext(), m.workDir, m.client.ModelName(), m.bash, m.mcp, m.hooks, m.skills, call)
+		return m, executeTool(m.newTurnContext(), m.workDir, m.client.EffectiveModelName(), m.bash, m.mcp, m.hooks, m.skills, m.subagents, call)
 	}
 }
 

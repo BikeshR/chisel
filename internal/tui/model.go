@@ -24,6 +24,7 @@ import (
 	"github.com/BikeshR/chisel/internal/permrules"
 	"github.com/BikeshR/chisel/internal/session"
 	"github.com/BikeshR/chisel/internal/skill"
+	"github.com/BikeshR/chisel/internal/subagentdef"
 )
 
 // inputHeight is how many rows the multi-line input box shows — fixed
@@ -59,10 +60,11 @@ type Model struct {
 	// deleting it) and /resume (switching to a past session's own ID).
 	sessionID string
 	permRules permrules.Config
-	// memUser/memProject record which CHISEL.md files were found at
-	// startup (see New) — kept only for /status to report later; the
-	// content itself already went to the client via SetMemory before
-	// this Model was ever built.
+	// memUser/memProject record whether memory.Load found anything at
+	// the user level (~/.chisel/CHISEL.md) and project level
+	// (<workDir>/AGENTS.md and/or CHISEL.md) at startup (see New) —
+	// kept only for /status to report later; the content itself already
+	// went to the client via SetMemory before this Model was ever built.
 	memUser, memProject bool
 	// customCommands are user-defined slash commands loaded at startup
 	// (~/.chisel/commands/*.md and <workDir>/.chisel/commands/*.md) —
@@ -75,6 +77,13 @@ type Model struct {
 	// up by name. Names+descriptions also went to the client via
 	// SetSkills before this Model was ever built, for the system prompt.
 	skills map[string]skill.Skill
+	// subagents are user-defined custom subagent roles loaded at
+	// startup (~/.chisel/agents/*.md and <workDir>/.chisel/agents/*.md,
+	// see internal/subagentdef) — threaded into agent.Execute so
+	// dispatch_subagent can resolve its optional "agent" role name.
+	// Names+descriptions also went to the client via SetSubagents
+	// before this Model was ever built, folded into that tool's schema.
+	subagents map[string]subagentdef.Subagent
 
 	messages []agent.Message
 	entries  []entry // transcript, newest last — see transcript.go
@@ -166,6 +175,21 @@ type Model struct {
 	// now. modelPickerSelected indexes into agent.KnownModels().
 	modelPickerActive   bool
 	modelPickerSelected int
+
+	// goal is a standing condition set by /goal — when a turn ends with
+	// no more tool calls and nothing else is queued, handleStreamComplete
+	// auto-submits a "keep going" follow-up instead of returning to idle,
+	// so a multi-turn task doesn't need "continue" retyped after every
+	// turn. Empty means no goal is set (the default, ordinary behavior).
+	// This never weakens the permission gate — every tool call the model
+	// makes while pursuing the goal still goes through the exact same
+	// y/n prompt as any other turn; it only automates the re-prompting.
+	// goalContinuations counts consecutive auto-continuations since the
+	// goal was last set or the user last submitted something themselves
+	// (see submit(), which resets it) — capped by maxGoalContinuations
+	// so an unbounded loop can't run away silently.
+	goal              string
+	goalContinuations int
 
 	// todos is the model's current task checklist, replaced wholesale
 	// on every successful update_todos call (see parseTodos in todo.go)
@@ -337,8 +361,9 @@ func interruptibleErrorText(err error) string {
 // there was nothing to resume — since a session can't be saved back to
 // without one. hooksCfg comes from hooks.LoadConfig — a zero value
 // is fine and just means no hooks configured. memUser/memProject report
-// which CHISEL.md files memory.Load found, just to show a startup line —
-// the content itself was already handed to the client via SetMemory.
+// whether memory.Load found anything at each level, just to show a
+// startup line — the content itself was already handed to the client
+// via SetMemory.
 // customCommands comes from customcmd.Load — a nil/empty map is fine and
 // just means no custom commands are available. checkpointStore comes
 // from checkpoint.Open — nil is fine and just means /rewind reports
@@ -346,7 +371,10 @@ func interruptibleErrorText(err error) string {
 // skills comes from skill.Load — a nil/empty map is fine and just means
 // load_skill has nothing to find. Callers should also have already
 // passed the same map to client.SetSkills before constructing here, so
-// the system prompt and the tool's actual lookup stay in sync. permRules
+// the system prompt and the tool's actual lookup stay in sync. subagents
+// comes from subagentdef.Load — a nil/empty map is fine and just means
+// dispatch_subagent only offers its single built-in role; the same
+// sync requirement applies, via client.SetSubagents. permRules
 // comes from permrules.Load — a nil/empty Config is fine and just means
 // no persistent rules are configured, same as an absent hooks.json.
 // sessionLoadFailed comes from session.LoadLatest's own corrupt return
@@ -354,7 +382,11 @@ func interruptibleErrorText(err error) string {
 // be read or parsed, as opposed to there simply being no prior session
 // yet; it drives a one-line warning so a corrupt session doesn't just
 // silently vanish with no indication anything went wrong.
-func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, customCommands map[string]customcmd.Command, checkpointStore *checkpoint.Store, skills map[string]skill.Skill, permRules permrules.Config, resumed []agent.Message, savedAt time.Time, sessionLoadFailed bool, sessionID string) Model {
+// sessionStartOutput comes from hooks.RunSessionStart, already run by
+// the caller before constructing here — empty if no SessionStart hooks
+// are configured or none printed anything; shown as a startup line the
+// same way the memory/session banners are.
+func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, memUser, memProject bool, customCommands map[string]customcmd.Command, checkpointStore *checkpoint.Store, skills map[string]skill.Skill, subagents map[string]subagentdef.Subagent, permRules permrules.Config, resumed []agent.Message, savedAt time.Time, sessionLoadFailed bool, sessionID string, sessionStartOutput string) Model {
 	ta := textarea.New()
 	ta.Placeholder = "ask chisel to do something… (alt+enter for a new line, @path to reference a file, !cmd to run a shell command directly, /help for commands)"
 	ta.Focus()
@@ -385,6 +417,7 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 		customCommands:    customCommands,
 		checkpointStore:   checkpointStore,
 		skills:            skills,
+		subagents:         subagents,
 		messages:          resumed,
 		textArea:          ta,
 		viewport:          vp,
@@ -398,6 +431,10 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 
 	if memUser || memProject {
 		m.entries = append(m.entries, entry{styled: dimStyle.Render("loaded " + memoryBannerText(memUser, memProject))})
+	}
+
+	if sessionStartOutput != "" {
+		m.entries = append(m.entries, entry{styled: dimStyle.Render("[sessionStart hook] " + sessionStartOutput)})
 	}
 
 	if sessionLoadFailed {
@@ -423,12 +460,16 @@ func New(client *agent.Client, workDir string, bash *agent.BashSession, mcpRegis
 	return m
 }
 
+// memoryBannerText doesn't say "CHISEL.md" unconditionally for the
+// project layer — memory.Load also reads a project's AGENTS.md
+// alongside (or instead of) CHISEL.md, and this can't tell from just
+// the two bools which one actually contributed.
 func memoryBannerText(memUser, memProject bool) string {
 	switch {
 	case memUser && memProject:
-		return "CHISEL.md (user + project)"
+		return "CHISEL.md (user) + project instructions"
 	case memProject:
-		return "CHISEL.md (project)"
+		return "project instructions (AGENTS.md/CHISEL.md)"
 	default:
 		return "CHISEL.md (user)"
 	}
@@ -612,7 +653,7 @@ func (m *Model) endStreamLine() {
 // approved via the permission prompt, rather than pre-empting the prompt
 // entirely — accepted for the simplicity of not needing a second async
 // round-trip before every permission decision.
-func executeTool(ctx context.Context, workDir, model string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, skills map[string]skill.Skill, call agent.ToolCall) tea.Cmd {
+func executeTool(ctx context.Context, workDir, model string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, skills map[string]skill.Skill, subagents map[string]subagentdef.Subagent, call agent.ToolCall) tea.Cmd {
 	// bash_background needs to return a tea.Batch (the "started" result,
 	// a record for Update to track, and a watcher that fires much
 	// later, whenever the command actually finishes) rather than a
@@ -663,7 +704,7 @@ func executeTool(ctx context.Context, workDir, model string, bash *agent.BashSes
 				result = agent.ToolResult{ID: call.ID, Content: agent.TruncateOutput(content), IsError: isError}
 			}
 		} else {
-			result = agent.Execute(ctx, workDir, model, call, bash, skills)
+			result = agent.Execute(ctx, workDir, model, call, bash, skills, subagents)
 		}
 
 		if !result.IsError {

@@ -160,6 +160,79 @@ func TestHandleNewCommand(t *testing.T) {
 	}
 }
 
+// TestHandleBranchCommand is the /branch counterpart to
+// TestHandleNewCommand above — the key difference under test is that
+// /branch must NOT reset messages/entries/doom-loop state the way /new
+// does, since forking is meant to continue exactly where the
+// conversation already was, just under a new, independently resumable
+// session id.
+func TestHandleBranchCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := "/home/brana/code/testproj"
+	oldID := session.NewID()
+
+	if err := session.Save(workDir, oldID, []agent.Message{{Role: "user", Content: "original conversation"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := Model{
+		workDir:             workDir,
+		sessionID:           oldID,
+		messages:            []agent.Message{{Role: "user", Content: "original conversation"}},
+		entries:             []entry{{styled: "you  original conversation"}},
+		lastToolResultIdx:   3,
+		lastToolCallKey:     "bash\x00{\"command\":\"ls\"}",
+		toolCallRepeatCount: 2,
+	}
+	got, cmd := m.handleBranchCommand()
+
+	if got.sessionID == oldID {
+		t.Error("expected /branch to mint a fresh session id, not reuse the old one")
+	}
+	if len(got.messages) != 1 || got.messages[0].Content != "original conversation" {
+		t.Errorf("messages = %+v, want the conversation carried over unchanged — /branch isn't /new", got.messages)
+	}
+	// 1 original entry carried over, plus the new "branched" announcement.
+	if len(got.entries) != 2 {
+		t.Errorf("entries = %+v, want the original transcript entry carried over plus the new announcement", got.entries)
+	}
+	if got.lastToolResultIdx != 3 || got.lastToolCallKey == "" || got.toolCallRepeatCount != 2 {
+		t.Errorf("lastToolResultIdx=%d lastToolCallKey=%q toolCallRepeatCount=%d, want all carried over — /branch isn't /new",
+			got.lastToolResultIdx, got.lastToolCallKey, got.toolCallRepeatCount)
+	}
+
+	lines := got.renderedLines()
+	if len(lines) != 2 || !strings.Contains(lines[1], "branched") {
+		t.Errorf("lines = %+v, want the carried-over transcript line plus a line announcing the branch", lines)
+	}
+
+	// The original session must still be loadable, untouched, under its
+	// own id — forking must not overwrite or delete it.
+	resumedMessages, _, ok := session.LoadByID(workDir, oldID)
+	if !ok {
+		t.Fatal("expected the original session to still be loadable after /branch")
+	}
+	if len(resumedMessages) != 1 || resumedMessages[0].Content != "original conversation" {
+		t.Errorf("original session messages = %+v, want unchanged", resumedMessages)
+	}
+
+	// /branch must save the fork immediately under the new id, so it's
+	// independently resumable even before another turn happens.
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd to persist the forked session immediately")
+	}
+	if msg := cmd(); msg != nil {
+		t.Errorf("cmd() = %v, want nil (no save error)", msg)
+	}
+	forkedMessages, _, ok := session.LoadByID(workDir, got.sessionID)
+	if !ok {
+		t.Fatal("expected the forked session to be loadable under its new id")
+	}
+	if len(forkedMessages) != 1 || forkedMessages[0].Content != "original conversation" {
+		t.Errorf("forked session messages = %+v, want the same conversation persisted under the new id", forkedMessages)
+	}
+}
+
 func TestHandleGitCommand(t *testing.T) {
 	t.Run("status with no args", func(t *testing.T) {
 		m := Model{workDir: t.TempDir()}

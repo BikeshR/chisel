@@ -162,7 +162,7 @@ func TestExecuteTruncatesErrorContentTheSameAsSuccessContent(t *testing.T) {
 	// embeds the name verbatim, so an oversized name produces an oversized
 	// error the same shape as a bash-timeout's embedded partial output.
 	longName := strings.Repeat("x", maxToolOutputChars+500)
-	result := Execute(t.Context(), t.TempDir(), "", call(longName, "{}"), nil, nil)
+	result := Execute(t.Context(), t.TempDir(), "", call(longName, "{}"), nil, nil, nil)
 
 	if !result.IsError {
 		t.Fatal("expected an error result for an unknown tool")

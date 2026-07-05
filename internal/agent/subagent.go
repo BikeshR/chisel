@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/BikeshR/chisel/internal/subagentdef"
 )
 
 // maxSubagentTurns bounds a subagent's own tool-calling loop — a safety
@@ -70,9 +72,10 @@ func runView(workDir string, rawInput json.RawMessage) (string, error) {
 	return viewPath(path, in.ViewRange)
 }
 
-func runDispatchSubagent(ctx context.Context, workDir, model string, rawInput json.RawMessage) (string, Usage, error) {
+func runDispatchSubagent(ctx context.Context, workDir, model string, rawInput json.RawMessage, subagents map[string]subagentdef.Subagent) (string, Usage, error) {
 	var in struct {
-		Task string `json:"task"`
+		Task  string `json:"task"`
+		Agent string `json:"agent"`
 	}
 	if err := json.Unmarshal(rawInput, &in); err != nil {
 		return "", Usage{}, err
@@ -80,25 +83,52 @@ func runDispatchSubagent(ctx context.Context, workDir, model string, rawInput js
 	if in.Task == "" {
 		return "", Usage{}, fmt.Errorf("task is required")
 	}
-	return RunSubagent(ctx, workDir, model, in.Task)
+	var rolePrompt string
+	if in.Agent != "" {
+		def, ok := subagents[in.Agent]
+		if !ok {
+			return "", Usage{}, fmt.Errorf("no subagent role named %q is defined", in.Agent)
+		}
+		rolePrompt = def.Prompt
+	}
+	return RunSubagent(ctx, workDir, model, in.Task, rolePrompt)
 }
 
 // RunSubagent runs a self-contained conversation using model, seeded with
-// task as the sole starting message and restricted to subagentTools() —
-// executed directly with no permission gate, since nothing in that tool
-// set can mutate anything. Returns the subagent's final answer and its
-// accumulated token usage across every turn it took — without plumbing
-// this back, a subagent's real cost (often the most expensive kind of
-// call here, being multi-turn on its own) was invisible to the parent's
-// token accounting, undercounting exactly when spend was highest.
-func RunSubagent(ctx context.Context, workDir, model, task string) (string, Usage, error) {
+// task (plus rolePrompt, if a custom subagent role was requested — see
+// subagentTaskPrompt) as the sole starting message, restricted to
+// subagentTools() — executed directly with no permission gate, since
+// nothing in that tool set can mutate anything. rolePrompt only ever
+// adds instructions layered on top of the task; it can't widen the tool
+// set a role runs with, which is what keeps every custom subagent role
+// exempt from the permission gate the same way the built-in one is.
+// Returns the subagent's final answer and its accumulated token usage
+// across every turn it took — without plumbing this back, a subagent's
+// real cost (often the most expensive kind of call here, being
+// multi-turn on its own) was invisible to the parent's token
+// accounting, undercounting exactly when spend was highest.
+func RunSubagent(ctx context.Context, workDir, model, task, rolePrompt string) (string, Usage, error) {
 	client := New(model)
 	client.tools = subagentTools()
 
-	history := []Message{{Role: "user", Content: subagentTaskPrompt(task)}}
+	history := []Message{{Role: "user", Content: subagentTaskPrompt(task, rolePrompt)}}
 	return RunLoop(ctx, client, history, maxSubagentTurns, func(call ToolCall) ToolResult {
-		return Execute(ctx, workDir, model, call, nil, nil) // subagentTools never dispatches to bash or load_skill
-	})
+		return Execute(ctx, workDir, model, call, nil, nil, nil) // subagentTools never dispatches to bash, load_skill, remember, or dispatch_subagent
+	}, nil)
+}
+
+// LoopEvent is one tool call's progress within RunLoop, reported via
+// its optional onEvent callback — chisel -p -json-stream's NDJSON mode
+// is the only caller that supplies one today (see main.go), so
+// CI/scripting output can show tool calls as they happen instead of
+// only a single blob once the whole run is done. Phase is "start"
+// (right before execTool runs) or "end" (right after); Result/IsError
+// are only meaningful for "end".
+type LoopEvent struct {
+	Phase   string
+	Tool    string
+	Result  string
+	IsError bool
 }
 
 // RunLoop runs a synchronous send/dispatch loop: send history to
@@ -108,7 +138,9 @@ func RunSubagent(ctx context.Context, workDir, model, task string) (string, Usag
 // answer and its accumulated token usage across every turn. Shared by
 // RunSubagent (execTool restricted to a fixed, read-only tool set with
 // no permission gate) and headless mode (chisel -p, in main.go), which
-// supplies its own tool set and dispatch function instead.
+// supplies its own tool set and dispatch function instead. onEvent is
+// called around every tool call if non-nil — nil is fine and the
+// common case (RunSubagent has nothing to report progress to).
 //
 // Every call is checked against client.tools — the exact schema sent in
 // the request — before reaching execTool. Both callers rely on "this
@@ -121,7 +153,7 @@ func RunSubagent(ctx context.Context, workDir, model, task string) (string, Usag
 // the package but was never offered — a str_replace_based_edit_tool
 // call is exactly the kind of thing every coding model has seen
 // thousands of times in training, offered or not.
-func RunLoop(ctx context.Context, client *Client, history []Message, maxTurns int, execTool func(ToolCall) ToolResult) (string, Usage, error) {
+func RunLoop(ctx context.Context, client *Client, history []Message, maxTurns int, execTool func(ToolCall) ToolResult, onEvent func(LoopEvent)) (string, Usage, error) {
 	var total Usage
 	offered := toolNameSet(client.tools)
 
@@ -148,6 +180,9 @@ func RunLoop(ctx context.Context, client *Client, history []Message, maxTurns in
 		}
 
 		for _, call := range msg.ToolCalls {
+			if onEvent != nil {
+				onEvent(LoopEvent{Phase: "start", Tool: call.Function.Name})
+			}
 			var result ToolResult
 			if !offered[call.Function.Name] {
 				result = ToolResult{
@@ -157,6 +192,9 @@ func RunLoop(ctx context.Context, client *Client, history []Message, maxTurns in
 				}
 			} else {
 				result = execTool(call)
+			}
+			if onEvent != nil {
+				onEvent(LoopEvent{Phase: "end", Tool: call.Function.Name, Result: result.Content, IsError: result.IsError})
 			}
 			history = append(history, result.ToMessage())
 		}
@@ -176,6 +214,10 @@ func toolNameSet(tools []Tool) map[string]bool {
 	return names
 }
 
-func subagentTaskPrompt(task string) string {
-	return "You are a read-only research subagent: you can explore (glob, grep, view) but can't edit files, run commands, or dispatch further subagents, and there's no one to answer follow-up questions. Complete this task and give one concise, final answer:\n\n" + task
+func subagentTaskPrompt(task, rolePrompt string) string {
+	base := "You are a read-only research subagent: you can explore (glob, grep, view) but can't edit files, run commands, or dispatch further subagents, and there's no one to answer follow-up questions."
+	if rolePrompt != "" {
+		base += "\n\n" + rolePrompt
+	}
+	return base + " Complete this task and give one concise, final answer:\n\n" + task
 }

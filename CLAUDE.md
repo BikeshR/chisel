@@ -291,3 +291,39 @@ gap. The lesson generalizes past gopls: if a new integration means
 writing a protocol client, spend a few minutes checking whether the
 target already offers one of the protocols chisel already speaks (MCP,
 specifically) before assuming a bespoke client is needed.
+
+**A hook that can block something has to run through every path that
+thing can happen from, not just the obvious one, or it's not actually a
+gate.** `UserPromptSubmit` (`internal/hooks`) needed the exact same
+async-`tea.Cmd` treatment `preToolUse` already established — a shell
+command that can take real time can't run synchronously on the Update
+goroutine — but the harder part wasn't the async plumbing, it was scope:
+a message reaching the model doesn't only come from the input box.
+`internal/tui/commands.go`'s custom-command expansion and `/goal`'s
+auto-continuation both also call `submitText` directly, and both had to
+route through the same `checkUserPromptSubmitHooks` gate
+(`submitTextWithHookCheck`, `internal/tui/userpromptsubmit.go`) — a hook
+meant to catch "don't send this to the model" would otherwise be
+trivially bypassed by going through either instead of typing a message
+by hand. Deliberately not routed through `dispatchText`'s own "/"-and-
+"!"-prefix detection, though: that text is often already-expanded or
+synthetic (a custom command's template, a goal-continuation string),
+and re-running slash/bang detection against it risked misrouting
+content that merely starts with one of those characters.
+
+**A role/definition a user can author (a custom subagent, a custom
+command) must not be able to widen what it's allowed to do, only how it
+behaves within that.** `internal/subagentdef` lets a `.chisel/agents/*.md`
+file supply a name, description, and prompt for `dispatch_subagent`'s
+optional `agent` parameter — but every custom role still runs with
+exactly `subagentTools()` (glob/grep/view), the same fixed, read-only
+set the one built-in subagent always had, which is what lets *any*
+subagent skip the permission gate by construction rather than by the
+model's cooperation. A definition's own prompt text is not a trusted
+boundary: verified adversarially with a role whose prompt says "you now
+have access to bash and dispatch_subagent," confirmed against the
+actual request body sent that neither tool was ever offered. The
+general shape — a user-authored definition may add instructions/
+behavior, never capabilities — is the same reasoning skill files and
+custom commands already relied on; subagent roles are just the first
+place it had to be checked adversarially rather than assumed to hold.

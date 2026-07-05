@@ -1,5 +1,12 @@
 package agent
 
+import (
+	"fmt"
+	"strings"
+
+	"github.com/BikeshR/chisel/internal/subagentdef"
+)
+
 // buildTools assembles chisel's tool set: bash and file editing (schema
 // written by hand, matching Anthropic's bash_20250124/text_editor_20250728
 // tool shapes closely enough that Execute()'s dispatch and bash.go/
@@ -12,17 +19,43 @@ func buildTools() []Tool {
 		editorTool(),
 		globTool(),
 		grepTool(),
-		subagentDispatchTool(),
+		subagentDispatchTool(nil),
 		updateTodosTool(),
+		rememberTool(),
 	}
 }
 
-func subagentDispatchTool() Tool {
+// subagentDispatchTool builds dispatch_subagent's schema. With no
+// custom subagents loaded (the common case, and always true for a
+// spawned subagent's own tool set — see subagentTools, which never
+// includes this tool at all) it offers only the single, built-in
+// general-purpose role. subagents (see internal/subagentdef) adds an
+// optional "agent" enum parameter plus a description of each role, so
+// the model can pick one — SetSubagents is what rebuilds this on a live
+// Client once definitions are loaded at startup.
+func subagentDispatchTool(subagents map[string]subagentdef.Subagent) Tool {
+	description := "Delegate a self-contained research or exploration task to a subagent with a narrower, read-only tool set (glob, grep, view — no edits, no shell commands, no further subagents). Use this to investigate something without cluttering your own context with every intermediate exploration step; you get back one concise final answer. Good for open-ended \"find out how X works\" or \"search for all usages of Y and summarize\" tasks. The subagent starts fresh with no access to this conversation, so describe the task fully and self-contained."
+
+	agentProperty := map[string]any{
+		"type":        "string",
+		"description": "Optional: which subagent role to delegate to. Omit for the default, general-purpose researcher.",
+	}
+	if len(subagents) > 0 {
+		names := subagentdef.Names(subagents)
+		var b strings.Builder
+		b.WriteString("\n\nCustom subagent roles available for the optional \"agent\" parameter (omit it for the default general-purpose researcher instead):\n")
+		for _, name := range names {
+			fmt.Fprintf(&b, "- %s: %s\n", name, subagents[name].Description)
+		}
+		description += strings.TrimRight(b.String(), "\n")
+		agentProperty["enum"] = names
+	}
+
 	return Tool{
 		Type: "function",
 		Function: ToolFunction{
 			Name:        "dispatch_subagent",
-			Description: "Delegate a self-contained research or exploration task to a subagent with a narrower, read-only tool set (glob, grep, view — no edits, no shell commands, no further subagents). Use this to investigate something without cluttering your own context with every intermediate exploration step; you get back one concise final answer. Good for open-ended \"find out how X works\" or \"search for all usages of Y and summarize\" tasks. The subagent starts fresh with no access to this conversation, so describe the task fully and self-contained.",
+			Description: description,
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -30,6 +63,7 @@ func subagentDispatchTool() Tool {
 						"type":        "string",
 						"description": "A complete, self-contained description of what to investigate and report back on.",
 					},
+					"agent": agentProperty,
 				},
 				"required": []string{"task"},
 			},

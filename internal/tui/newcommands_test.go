@@ -123,6 +123,22 @@ func TestHandleStatusCommandReportsNoHooksOrMemoryWhenAbsent(t *testing.T) {
 	}
 }
 
+// TestMemoryBannerTextDoesNotOverclaimChiselMdForProjectOnly is the
+// regression test for a bug memoryBannerText's own wording would
+// otherwise reintroduce: the project layer can come from AGENTS.md,
+// CHISEL.md, or both — claiming "CHISEL.md (project)" unconditionally
+// would be wrong whenever AGENTS.md was actually the (or the only)
+// source.
+func TestMemoryBannerTextDoesNotOverclaimChiselMdForProjectOnly(t *testing.T) {
+	got := memoryBannerText(false, true)
+	if got == "CHISEL.md (project)" {
+		t.Errorf("memoryBannerText(false, true) = %q, want it not to claim CHISEL.md exclusively — the project layer may have come from AGENTS.md instead", got)
+	}
+	if !strings.Contains(got, "AGENTS.md") {
+		t.Errorf("memoryBannerText(false, true) = %q, want it to mention AGENTS.md as a possible source", got)
+	}
+}
+
 func TestBrokenMCPCountCountsOnlyBroken(t *testing.T) {
 	statuses := []mcp.ServerStatus{
 		{Name: "ok-server", Broken: false},

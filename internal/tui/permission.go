@@ -42,20 +42,31 @@ const (
 // absolute guarantee that nothing runs, so a rule (or a previous
 // always-allow decision) must still be blocked while it's on, not
 // silently exempted from it.
-func decidePermission(call agent.ToolCall, planMode bool, allowlist map[string]bool, rules permrules.Config) (decision permissionDecision, reason string) {
+func decidePermission(call agent.ToolCall, mode agent.Mode, allowlist map[string]bool, rules permrules.Config) (decision permissionDecision, reason string) {
 	needsConfirmation := needsPermission(call)
 
 	if ruleDecision, matched := matchPermissionRules(rules, call); matched {
 		if ruleDecision == permrules.Deny {
 			return permissionDeny, fmt.Sprintf("Not run — a rule in .chisel/permissions.json denies %s.", summarizeCall(call))
 		}
-		if !needsConfirmation || !planMode {
+		if !needsConfirmation || mode != agent.ModePlan {
 			return permissionAllow, ""
 		}
 	}
 
-	if needsConfirmation && planMode {
+	if needsConfirmation && mode == agent.ModePlan {
 		return permissionDeny, "Not run — chisel is in plan mode, which only allows read-only exploration. Describe this as part of your plan instead, then stop; the user will exit plan mode before you make any changes."
+	}
+	// Accept-edits mode auto-approves only chisel's own known, path-
+	// validated (resolveInWorkDir) editor tool — never bash or an MCP
+	// tool, which chisel can't reason about the effect of the way it can
+	// a diffed file edit. This is deliberately narrower than an
+	// auto-approve-everything mode: chisel has no bash sandbox, so
+	// blanket auto-approval of arbitrary shell commands stays exactly as
+	// gated as it's always been (see docs/design.md's own reasoning for
+	// why sandboxing is a prerequisite for that, not this).
+	if needsConfirmation && mode == agent.ModeAcceptEdits && isEditCall(call) {
+		return permissionAllow, ""
 	}
 	if needsConfirmation {
 		if key, ok := allowlistKey(call); ok && allowlist[key] {
@@ -64,6 +75,17 @@ func decidePermission(call agent.ToolCall, planMode bool, allowlist map[string]b
 		return permissionAsk, ""
 	}
 	return permissionAllow, ""
+}
+
+// isEditCall reports whether call is chisel's own file-editing tool —
+// the only call type accept-edits mode auto-approves. Doesn't need to
+// re-check which specific edit subcommand it is: decidePermission only
+// calls this when needsPermission(call) is already true, and the editor
+// tool's "view" subcommand never needs permission in the first place
+// (see agent.NeedsPermission), so reaching here already means it's a
+// mutating one.
+func isEditCall(call agent.ToolCall) bool {
+	return call.Function.Name == "str_replace_based_edit_tool"
 }
 
 // matchPermissionRules extracts the text a rule's pattern should match

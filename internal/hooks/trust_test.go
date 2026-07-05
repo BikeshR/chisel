@@ -91,4 +91,22 @@ func TestConfigHasAny(t *testing.T) {
 	if !withPost.HasAny() {
 		t.Error("HasAny() = false with a postToolUse hook configured")
 	}
+
+	var withSessionStart Config
+	withSessionStart.Hooks.SessionStart = []Hook{{Command: "exit 0"}}
+	if !withSessionStart.HasAny() {
+		t.Error("HasAny() = false with a sessionStart hook configured")
+	}
+
+	var withSessionEnd Config
+	withSessionEnd.Hooks.SessionEnd = []Hook{{Command: "exit 0"}}
+	if !withSessionEnd.HasAny() {
+		t.Error("HasAny() = false with a sessionEnd hook configured")
+	}
+
+	var withUserPromptSubmit Config
+	withUserPromptSubmit.Hooks.UserPromptSubmit = []Hook{{Command: "exit 0"}}
+	if !withUserPromptSubmit.HasAny() {
+		t.Error("HasAny() = false with a userPromptSubmit hook configured")
+	}
 }
