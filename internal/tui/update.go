@@ -66,6 +66,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case userPromptHookResultMsg:
 		return m.handleUserPromptHookResult(msg)
 
+	case mcpPromptResultMsg:
+		return m.handleMCPPromptResult(msg)
+
+	case mcpResourceResultMsg:
+		return m.handleMCPResourceResult(msg)
+
 	case sessionSaveErrorMsg:
 		m.appendLine(errorStyle.Render("session save failed: " + msg.err.Error()))
 		return m, nil
@@ -159,7 +165,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			call := m.pendingUses[0]
 			m.startBusy(stateExecutingTool)
 			m.appendLine(dimStyle.Render("  → approved"))
-			return m, executeTool(m.newTurnContext(), m.workDir, m.client.EffectiveModelName(), m.bash, m.mcp, m.hooks, m.skills, m.subagents, call)
+			return m, executeTool(m.newTurnContext(), m.workDir, m.client.EffectiveModelName(), m.bash, m.mcp, m.hooks, m.skills, m.subagents, m.client.PlannerModel(), call)
 		case "a", "A":
 			call := m.pendingUses[0]
 			// A doom-loop-forced prompt never offers "a" (see
@@ -176,7 +182,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.startBusy(stateExecutingTool)
 			m.appendLine(dimStyle.Render("  → approved (always allow for this session)"))
-			return m, executeTool(m.newTurnContext(), m.workDir, m.client.EffectiveModelName(), m.bash, m.mcp, m.hooks, m.skills, m.subagents, call)
+			return m, executeTool(m.newTurnContext(), m.workDir, m.client.EffectiveModelName(), m.bash, m.mcp, m.hooks, m.skills, m.subagents, m.client.PlannerModel(), call)
 		case "p", "P":
 			// Same doom-loop guard as "a" — a forced confirmation never
 			// offers this option (see dispatchNextTool), but the key
@@ -218,7 +224,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.appendLine(dimStyle.Render("  → approved"))
 			}
 			m.startBusy(stateExecutingTool)
-			return m, executeTool(m.newTurnContext(), m.workDir, m.client.EffectiveModelName(), m.bash, m.mcp, m.hooks, m.skills, m.subagents, call)
+			return m, executeTool(m.newTurnContext(), m.workDir, m.client.EffectiveModelName(), m.bash, m.mcp, m.hooks, m.skills, m.subagents, m.client.PlannerModel(), call)
 		case "n", "N":
 			// Denying isn't a dead end: rather than immediately resending
 			// a canned "denied" message and letting the model guess why,
@@ -507,10 +513,12 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.textArea.Reset()
 
 	// A real, keystroke-driven submission is the user actively steering
-	// — reset the goal auto-continuation count so a fresh run of
-	// continuations gets the full budget again, rather than counting
-	// against whatever was left over from before they typed anything.
+	// — reset the goal auto-continuation count (and the repeated-text
+	// guard riding alongside it) so a fresh run gets the full budget
+	// again, rather than counting against whatever was left over from
+	// before they typed anything.
 	m.goalContinuations = 0
+	m.assistantTextRepeatCount = 0
 
 	// A denial from the permission prompt is waiting on a reason (or an
 	// explicit "no reason" via an empty submission) — resolve it here
@@ -738,6 +746,14 @@ func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage, finis
 	if finishReason == "length" {
 		m.appendLine(dimStyle.Render("(response truncated — hit the model's length limit)"))
 	}
+	if resp.Content != "" {
+		if resp.Content == m.lastAssistantText {
+			m.assistantTextRepeatCount++
+		} else {
+			m.lastAssistantText = resp.Content
+			m.assistantTextRepeatCount = 1
+		}
+	}
 	m.pendingUses = resp.ToolCalls
 
 	if len(m.pendingUses) == 0 {
@@ -791,7 +807,7 @@ func (m Model) handleStreamComplete(resp agent.Message, usage agent.Usage, finis
 		if autoCompacting {
 			m.appendLine(dimStyle.Render("context is large — compacting automatically…"))
 			m.startBusy(stateWaitingModel)
-			return m, tea.Batch(save, notify, autoCommitCmd, gitStatus, compact(m.newTurnContext(), m.client, m.messages))
+			return m, tea.Batch(save, notify, autoCommitCmd, gitStatus, compact(m.newTurnContext(), m.client, m.messages, "", m.workDir, m.hooks))
 		}
 
 		return m, tea.Batch(save, notify, queued, autoCommitCmd, gitStatus, goalCmd)
@@ -883,7 +899,7 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	default: // permissionAllow
 		m.startBusy(stateExecutingTool)
 		m.appendLine(toolStyle.Render("  " + summarizeCall(call)))
-		return m, executeTool(m.newTurnContext(), m.workDir, m.client.EffectiveModelName(), m.bash, m.mcp, m.hooks, m.skills, m.subagents, call)
+		return m, executeTool(m.newTurnContext(), m.workDir, m.client.EffectiveModelName(), m.bash, m.mcp, m.hooks, m.skills, m.subagents, m.client.PlannerModel(), call)
 	}
 }
 

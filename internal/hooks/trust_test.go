@@ -109,4 +109,10 @@ func TestConfigHasAny(t *testing.T) {
 	if !withUserPromptSubmit.HasAny() {
 		t.Error("HasAny() = false with a userPromptSubmit hook configured")
 	}
+
+	var withPreCompact Config
+	withPreCompact.Hooks.PreCompact = []Hook{{Command: "exit 0"}}
+	if !withPreCompact.HasAny() {
+		t.Error("HasAny() = false with a preCompact hook configured")
+	}
 }

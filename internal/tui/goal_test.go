@@ -144,6 +144,98 @@ func TestContinueTowardGoalStopsAtLimit(t *testing.T) {
 	}
 }
 
+// TestHandleStreamCompleteTracksRepeatedAssistantText confirms the
+// counter itself increments on identical consecutive responses and
+// resets once the text actually changes.
+func TestHandleStreamCompleteTracksRepeatedAssistantText(t *testing.T) {
+	m := Model{client: agent.New("minimax-m3")}
+
+	got, _ := m.handleStreamComplete(agent.Message{Role: "assistant", Content: "still working on it"}, agent.Usage{}, "stop")
+	gotModel := got.(Model)
+	if gotModel.assistantTextRepeatCount != 1 {
+		t.Errorf("assistantTextRepeatCount = %d, want 1 after the first response", gotModel.assistantTextRepeatCount)
+	}
+
+	got, _ = gotModel.handleStreamComplete(agent.Message{Role: "assistant", Content: "still working on it"}, agent.Usage{}, "stop")
+	gotModel = got.(Model)
+	if gotModel.assistantTextRepeatCount != 2 {
+		t.Errorf("assistantTextRepeatCount = %d, want 2 after an identical repeat", gotModel.assistantTextRepeatCount)
+	}
+
+	got, _ = gotModel.handleStreamComplete(agent.Message{Role: "assistant", Content: "actually, found the bug"}, agent.Usage{}, "stop")
+	gotModel = got.(Model)
+	if gotModel.assistantTextRepeatCount != 1 {
+		t.Errorf("assistantTextRepeatCount = %d, want reset to 1 once the text changes", gotModel.assistantTextRepeatCount)
+	}
+}
+
+// TestContinueTowardGoalStopsOnRepeatedAssistantText is the direct
+// regression test for the whole feature: a goal auto-continuation must
+// not keep firing once the model's own responses are stuck repeating
+// verbatim — that would just burn through maxGoalContinuations for no
+// actual progress.
+func TestContinueTowardGoalStopsOnRepeatedAssistantText(t *testing.T) {
+	m := Model{goal: "fix the flaky test", assistantTextRepeatCount: assistantTextRepeatThreshold}
+	got, cmd := m.continueTowardGoal()
+
+	if cmd != nil {
+		t.Error("expected a nil Cmd once repeated text hits the threshold")
+	}
+	if got.goal != "" {
+		t.Errorf("goal = %q, want cleared once stuck", got.goal)
+	}
+	lines := got.renderedLines()
+	found := false
+	for _, l := range lines {
+		if strings.Contains(l, "identical") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("lines = %+v, want a line explaining the repeated-text stop", lines)
+	}
+}
+
+// TestContinueTowardGoalProceedsBelowRepeatThreshold confirms the guard
+// doesn't trip prematurely — a couple of turns happening to share text
+// isn't yet "stuck."
+func TestContinueTowardGoalProceedsBelowRepeatThreshold(t *testing.T) {
+	m := newInputModel()
+	m.goal = "fix the flaky test"
+	m.assistantTextRepeatCount = assistantTextRepeatThreshold - 1
+
+	_, cmd := m.continueTowardGoal()
+	if cmd == nil {
+		t.Error("expected a non-nil Cmd — the repeat threshold hasn't been hit yet")
+	}
+}
+
+// TestSubmitResetsAssistantTextRepeatCount mirrors
+// TestSubmitResetsGoalContinuations for the new counter — a real,
+// keystroke-driven submission means the user is actively steering, so
+// a fresh run should get the full repeat-detection budget again.
+func TestSubmitResetsAssistantTextRepeatCount(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n"))
+	}))
+	defer server.Close()
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	m := newInputModel()
+	m.client = agent.New("minimax-m3")
+	m.assistantTextRepeatCount = 2
+	m.textArea.SetValue("hello")
+
+	got, _ := m.submit()
+	gotModel := got.(Model)
+
+	if gotModel.assistantTextRepeatCount != 0 {
+		t.Errorf("assistantTextRepeatCount = %d, want reset to 0 by a real submission", gotModel.assistantTextRepeatCount)
+	}
+}
+
 // TestSubmitResetsGoalContinuations confirms a real, keystroke-driven
 // submission resets the continuation count — a fresh run of
 // continuations should get the full budget again rather than

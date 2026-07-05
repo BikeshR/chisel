@@ -89,10 +89,13 @@ func isEditCall(call agent.ToolCall) bool {
 }
 
 // matchPermissionRules extracts the text a rule's pattern should match
-// against for call, and checks it against rules — currently just bash
-// and bash_background, matched against the command text itself; other
-// tools have no natural single string to match a shell-style glob
-// against, so they're left to the normal allow/ask/deny path.
+// against for call, and checks it against rules — bash/bash_background
+// against the command text itself, str_replace_based_edit_tool against
+// its path (a file path is just as natural a single string to glob-match
+// as a bash command is — "allow edits under src/**" reads the same way
+// "allow git *" already does). Any other tool has no natural single
+// string to match a shell-style glob against, so it's left to the
+// normal allow/ask/deny path.
 func matchPermissionRules(rules permrules.Config, call agent.ToolCall) (permrules.Decision, bool) {
 	switch call.Function.Name {
 	case "bash", "bash_background":
@@ -103,6 +106,14 @@ func matchPermissionRules(rules permrules.Config, call agent.ToolCall) (permrule
 			return "", false
 		}
 		return permrules.Match(rules, call.Function.Name, in.Command)
+	case "str_replace_based_edit_tool":
+		var in struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &in); err != nil || in.Path == "" {
+			return "", false
+		}
+		return permrules.Match(rules, call.Function.Name, in.Path)
 	default:
 		return "", false
 	}
@@ -177,11 +188,10 @@ func allowlistKey(call agent.ToolCall) (key string, ok bool) {
 // permrules.Add would use to permanently allow call going forward (see
 // the "p" prompt option in update.go), and whether call is eligible at
 // all. Deliberately matches exactly what matchPermissionRules above
-// already supports — bash/bash_background command text — since a
-// persistent rule for anything else (a file edit's path, an MCP tool by
-// name) has no natural single string to write a shell-style glob
-// against, the same reasoning permrules.Match's own tool switch is
-// restricted to those two.
+// already supports — bash/bash_background command text, and
+// str_replace_based_edit_tool's path — since a persistent rule for
+// anything else (an MCP tool's own arguments, say) has no natural
+// single string to write a shell-style glob against.
 func persistableRuleFor(call agent.ToolCall) (toolName, pattern string, ok bool) {
 	switch call.Function.Name {
 	case "bash", "bash_background":
@@ -192,6 +202,14 @@ func persistableRuleFor(call agent.ToolCall) (toolName, pattern string, ok bool)
 			return "", "", false
 		}
 		return call.Function.Name, in.Command, true
+	case "str_replace_based_edit_tool":
+		var in struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &in); err != nil || in.Path == "" {
+			return "", "", false
+		}
+		return call.Function.Name, in.Path, true
 	default:
 		return "", "", false
 	}

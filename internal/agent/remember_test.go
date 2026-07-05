@@ -58,7 +58,7 @@ func TestSummarizeRemember(t *testing.T) {
 func TestExecuteRemember(t *testing.T) {
 	dir := t.TempDir()
 	call := ToolCall{ID: "call_1", Function: ToolCallFunction{Name: "remember", Arguments: `{"note":"a durable fact"}`}}
-	result := Execute(context.Background(), dir, "minimax-m3", call, nil, nil, nil)
+	result := Execute(context.Background(), dir, "minimax-m3", call, nil, nil, nil, "")
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content)
 	}

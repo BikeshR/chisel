@@ -2,6 +2,8 @@ package hooks
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -50,6 +52,35 @@ func TestRunSessionEndRunsCommandAndReportsErrors(t *testing.T) {
 
 	if err := RunSessionEnd(context.Background(), dir, []Hook{{Command: "exit 0"}}); err != nil {
 		t.Errorf("RunSessionEnd: %v, want nil for a successful hook", err)
+	}
+}
+
+func TestRunPreCompactRunsCommandAndExposesTranscriptPath(t *testing.T) {
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "transcript.md")
+	if err := os.WriteFile(transcriptPath, []byte("# the conversation"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	backupPath := filepath.Join(dir, "backup.md")
+	list := []Hook{{Command: `cp "$CHISEL_HOOK_TRANSCRIPT_PATH" "` + backupPath + `"`}}
+
+	if err := RunPreCompact(context.Background(), dir, list, transcriptPath); err != nil {
+		t.Fatalf("RunPreCompact: %v", err)
+	}
+
+	data, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("expected the hook to have copied the transcript: %v", err)
+	}
+	if string(data) != "# the conversation" {
+		t.Errorf("backup content = %q", data)
+	}
+}
+
+func TestRunPreCompactNoHooksConfiguredIsANoOp(t *testing.T) {
+	if err := RunPreCompact(context.Background(), t.TempDir(), nil, "/tmp/whatever.md"); err != nil {
+		t.Errorf("RunPreCompact: %v, want nil with no hooks configured", err)
 	}
 }
 

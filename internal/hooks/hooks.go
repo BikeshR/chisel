@@ -53,6 +53,15 @@ type Config struct {
 		SessionStart     []Hook `json:"sessionStart"`
 		SessionEnd       []Hook `json:"sessionEnd"`
 		UserPromptSubmit []Hook `json:"userPromptSubmit"`
+		// PreCompact fires right before a conversation is replaced with
+		// its own summary (/compact, or auto-compact past the context
+		// threshold) — notification-only like SessionStart/SessionEnd,
+		// not a gate: once compaction has been decided (by the user
+		// typing /compact, or the threshold being hit), there's no
+		// sensible "block it" answer. CHISEL_HOOK_TRANSCRIPT_PATH points
+		// to a temp file holding the full conversation as markdown, so a
+		// hook can back it up before it's gone — see RunPreCompact.
+		PreCompact []Hook `json:"preCompact"`
 	} `json:"hooks"`
 }
 
@@ -142,10 +151,10 @@ func RunSessionEnd(ctx context.Context, workDir string, list []Hook) error {
 	return err
 }
 
-func runAllCollectingOutput(ctx context.Context, workDir string, list []Hook) (string, error) {
+func runAllCollectingOutput(ctx context.Context, workDir string, list []Hook, extraEnv ...string) (string, error) {
 	var out []string
 	for _, h := range list {
-		output, _, err := run(ctx, workDir, h)
+		output, _, err := run(ctx, workDir, h, extraEnv...)
 		if err != nil {
 			return "", err
 		}
@@ -154,6 +163,19 @@ func runAllCollectingOutput(ctx context.Context, workDir string, list []Hook) (s
 		}
 	}
 	return strings.Join(out, "\n"), nil
+}
+
+// RunPreCompact runs every configured PreCompact hook, in order, right
+// before a conversation is about to be replaced with its own summary.
+// transcriptPath (if non-empty) is exposed as CHISEL_HOOK_TRANSCRIPT_PATH
+// — a temp file holding the full conversation, so a hook can back it up
+// before it's gone. Notification-only, the same as SessionStart/
+// SessionEnd: there's no sensible "block it" answer once compaction has
+// already been decided (the user typed /compact, or the auto-compact
+// threshold was hit).
+func RunPreCompact(ctx context.Context, workDir string, list []Hook, transcriptPath string) error {
+	_, err := runAllCollectingOutput(ctx, workDir, list, "CHISEL_HOOK_TRANSCRIPT_PATH="+transcriptPath)
+	return err
 }
 
 // RunUserPromptSubmit runs every configured UserPromptSubmit hook, in

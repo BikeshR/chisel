@@ -35,5 +35,6 @@ func Trust(hash string) error {
 // (but present) hooks.json shouldn't trigger a trust prompt for nothing.
 func (c Config) HasAny() bool {
 	return len(c.Hooks.PreToolUse) > 0 || len(c.Hooks.PostToolUse) > 0 ||
-		len(c.Hooks.SessionStart) > 0 || len(c.Hooks.SessionEnd) > 0 || len(c.Hooks.UserPromptSubmit) > 0
+		len(c.Hooks.SessionStart) > 0 || len(c.Hooks.SessionEnd) > 0 || len(c.Hooks.UserPromptSubmit) > 0 ||
+		len(c.Hooks.PreCompact) > 0
 }

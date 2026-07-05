@@ -213,7 +213,7 @@ func TestConfirmHooksTrustShowsNewEventTypes(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(hooksPath, []byte(`{"hooks":{"userPromptSubmit":[{"command":"check-secrets.sh"}]}}`), 0o644); err != nil {
+	if err := os.WriteFile(hooksPath, []byte(`{"hooks":{"userPromptSubmit":[{"command":"check-secrets.sh"}],"preCompact":[{"command":"backup-transcript.sh"}]}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -231,6 +231,9 @@ func TestConfirmHooksTrustShowsNewEventTypes(t *testing.T) {
 	printed := string(out)
 	if !strings.Contains(printed, "check-secrets.sh") {
 		t.Errorf("printed prompt = %q, want the userPromptSubmit hook's command shown, not the generic fallback message", printed)
+	}
+	if !strings.Contains(printed, "backup-transcript.sh") {
+		t.Errorf("printed prompt = %q, want the preCompact hook's command shown too", printed)
 	}
 }
 

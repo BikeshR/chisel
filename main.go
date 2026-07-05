@@ -442,7 +442,7 @@ func runHeadlessCore(workDir, model, prompt string, onEvent func(agent.LoopEvent
 	ctx := context.Background()
 	history := []agent.Message{{Role: "user", Content: prompt}}
 	return agent.RunLoop(ctx, client, history, maxHeadlessTurns, func(call agent.ToolCall) agent.ToolResult {
-		return agent.Execute(ctx, workDir, model, call, nil, nil, nil)
+		return agent.Execute(ctx, workDir, model, call, nil, nil, nil, "")
 	}, onEvent)
 }
 
@@ -554,6 +554,9 @@ func confirmHooksTrustFrom(workDir string, in io.Reader) bool {
 		}
 		for _, h := range hooksCfgPreview.Hooks.UserPromptSubmit {
 			fmt.Printf("  userPromptSubmit: %s\n", h.Command)
+		}
+		for _, h := range hooksCfgPreview.Hooks.PreCompact {
+			fmt.Printf("  preCompact: %s\n", h.Command)
 		}
 	}
 	fmt.Print("Trust and run them for this project? [y/N] ")

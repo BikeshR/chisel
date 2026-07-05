@@ -111,6 +111,47 @@ func runFakeServer() {
 					{Name: "echo", Description: "echoes its input", InputSchema: map[string]any{"type": "object"}},
 				}}
 			}
+		case "resources/list":
+			if os.Getenv("CHISEL_MCP_FAKE_SERVER_RESOURCES") == "1" {
+				result = resourcesListResult{Resources: []Resource{
+					{URI: "file:///notes.txt", Name: "notes", Description: "project notes"},
+				}}
+			} else {
+				result = map[string]any{} // unsupported by this fake server — see Start's graceful-degradation handling
+			}
+		case "resources/read":
+			var params resourcesReadParams
+			_ = json.Unmarshal(req.Params, &params)
+			result = resourcesReadResult{Contents: []struct {
+				URI      string `json:"uri"`
+				MimeType string `json:"mimeType"`
+				Text     string `json:"text"`
+			}{{URI: params.URI, Text: "contents of " + params.URI}}}
+		case "prompts/list":
+			if os.Getenv("CHISEL_MCP_FAKE_SERVER_PROMPTS") == "1" {
+				result = promptsListResult{Prompts: []Prompt{
+					{Name: "review", Description: "review code", Arguments: []PromptArgument{{Name: "focus", Required: false}}},
+				}}
+			} else {
+				result = map[string]any{}
+			}
+		case "prompts/get":
+			var params promptsGetParams
+			_ = json.Unmarshal(req.Params, &params)
+			text := "expanded prompt: " + params.Name
+			if focus, ok := params.Arguments["focus"]; ok {
+				text += " focused on " + focus
+			}
+			result = promptsGetResult{Messages: []struct {
+				Role    string `json:"role"`
+				Content struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			}{{Role: "user", Content: struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}{Type: "text", Text: text}}}}
 		case "tools/call":
 			var params toolsCallParams
 			_ = json.Unmarshal(req.Params, &params)
@@ -172,6 +213,13 @@ func fakeServerConfigInfinitePages() ServerConfig {
 	}
 }
 
+func fakeServerConfigWithResourcesAndPrompts() ServerConfig {
+	return ServerConfig{
+		Command: os.Args[0],
+		Env:     map[string]string{"CHISEL_MCP_FAKE_SERVER": "1", "CHISEL_MCP_FAKE_SERVER_RESOURCES": "1", "CHISEL_MCP_FAKE_SERVER_PROMPTS": "1"},
+	}
+}
+
 func fakeServerConfigPingCollision() ServerConfig {
 	return ServerConfig{
 		Command: os.Args[0],
@@ -189,6 +237,76 @@ func TestServerStartAndListTools(t *testing.T) {
 	tools := s.Tools()
 	if len(tools) != 1 || tools[0].Name != "echo" {
 		t.Fatalf("Tools() = %+v, want one tool named echo", tools)
+	}
+}
+
+// TestServerStartWithoutResourcesOrPromptsSupportDoesNotFail confirms
+// the graceful-degradation path: a server that only implements tools
+// (the common case — fakeServerConfig's default fake server has no
+// resources/prompts handling beyond the generic "unsupported method"
+// response) must start successfully with both simply empty, not error.
+func TestServerStartWithoutResourcesOrPromptsSupportDoesNotFail(t *testing.T) {
+	s, err := Start("fake", fakeServerConfig())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	if len(s.Resources()) != 0 {
+		t.Errorf("Resources() = %+v, want empty for a server with no resources/list support", s.Resources())
+	}
+	if len(s.Prompts()) != 0 {
+		t.Errorf("Prompts() = %+v, want empty for a server with no prompts/list support", s.Prompts())
+	}
+}
+
+func TestServerStartListsResourcesAndPrompts(t *testing.T) {
+	s, err := Start("fake", fakeServerConfigWithResourcesAndPrompts())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	resources := s.Resources()
+	if len(resources) != 1 || resources[0].URI != "file:///notes.txt" {
+		t.Fatalf("Resources() = %+v, want one resource", resources)
+	}
+
+	prompts := s.Prompts()
+	if len(prompts) != 1 || prompts[0].Name != "review" {
+		t.Fatalf("Prompts() = %+v, want one prompt", prompts)
+	}
+}
+
+func TestServerReadResource(t *testing.T) {
+	s, err := Start("fake", fakeServerConfigWithResourcesAndPrompts())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	content, err := s.ReadResource(context.Background(), "file:///notes.txt")
+	if err != nil {
+		t.Fatalf("ReadResource: %v", err)
+	}
+	if !strings.Contains(content, "file:///notes.txt") {
+		t.Errorf("content = %q, want it to reflect the requested URI", content)
+	}
+}
+
+func TestServerGetPrompt(t *testing.T) {
+	s, err := Start("fake", fakeServerConfigWithResourcesAndPrompts())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	text, err := s.GetPrompt(context.Background(), "review", map[string]string{"focus": "security"})
+	if err != nil {
+		t.Fatalf("GetPrompt: %v", err)
+	}
+	if !strings.Contains(text, "review") || !strings.Contains(text, "security") {
+		t.Errorf("text = %q, want it to reflect the prompt name and argument", text)
 	}
 }
 

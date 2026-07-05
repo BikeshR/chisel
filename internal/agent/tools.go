@@ -122,6 +122,12 @@ func Summarize(call ToolCall) string {
 			return fmt.Sprintf("subagent (%s): %s", in.Agent, in.Task)
 		}
 		return "subagent: " + in.Task
+	case "consult_oracle":
+		var in struct {
+			Question string `json:"question"`
+		}
+		_ = json.Unmarshal(call.input(), &in)
+		return "oracle: " + in.Question
 	case "update_todos":
 		var in struct {
 			Todos []TodoItem `json:"todos"`
@@ -158,7 +164,10 @@ func Summarize(call ToolCall) string {
 // loaded, or the caller's own tool set never offers dispatch_subagent
 // at all (a spawned subagent's own execTool closure always passes nil
 // here, since subagentTools() never includes dispatch_subagent).
-func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *BashSession, skills map[string]skill.Skill, subagents map[string]subagentdef.Subagent) ToolResult {
+// plannerModel is only used by consult_oracle — "" is fine and just
+// means the oracle falls back to using model itself (see
+// runConsultOracle), same as no planner model being configured at all.
+func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *BashSession, skills map[string]skill.Skill, subagents map[string]subagentdef.Subagent, plannerModel string) ToolResult {
 	var content string
 	var usage Usage
 	var err error
@@ -176,6 +185,8 @@ func Execute(ctx context.Context, workDir, model string, call ToolCall, bash *Ba
 		content, err = runView(workDir, call.input())
 	case "dispatch_subagent":
 		content, usage, err = runDispatchSubagent(ctx, workDir, model, call.input(), subagents)
+	case "consult_oracle":
+		content, usage, err = runConsultOracle(ctx, workDir, model, plannerModel, call.input())
 	case "update_todos":
 		content, err = runUpdateTodos(call.input())
 	case "load_skill":

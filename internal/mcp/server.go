@@ -39,7 +39,9 @@ type Server struct {
 	nextID  int
 	pending map[int]chan readResult
 
-	tools []Tool
+	tools     []Tool
+	resources []Resource
+	prompts   []Prompt
 
 	// broken is set once the connection itself is known to be
 	// unusable — a read failure (EOF, a malformed line) or a failed
@@ -109,11 +111,28 @@ func Start(name string, cfg ServerConfig) (*Server, error) {
 	}
 	s.tools = tools
 
+	// Unlike tools/list, resources/list and prompts/list are optional
+	// per the MCP spec — a server that only offers tools legitimately
+	// has neither, and calls "method not found" rather than an empty
+	// list. Best-effort: any error here (including a genuine transport
+	// failure) just leaves resources/prompts empty rather than failing
+	// the whole server start over a capability most servers don't have.
+	s.resources, _ = s.listResources()
+	s.prompts, _ = s.listPrompts()
+
 	return s, nil
 }
 
 // Tools returns the server's tools, in its own (unprefixed) naming.
 func (s *Server) Tools() []Tool { return s.tools }
+
+// Resources returns the server's resources (empty if it doesn't
+// implement resources/list at all), in its own naming.
+func (s *Server) Resources() []Resource { return s.resources }
+
+// Prompts returns the server's prompts (empty if it doesn't implement
+// prompts/list at all), in its own naming.
+func (s *Server) Prompts() []Prompt { return s.prompts }
 
 // Close shuts down the server process. Safe to call more than once.
 func (s *Server) Close() {
@@ -198,6 +217,106 @@ func (s *Server) listTools() ([]Tool, error) {
 		cursor = result.NextCursor
 	}
 	return tools, nil
+}
+
+func (s *Server) listResources() ([]Resource, error) {
+	var resources []Resource
+	cursor := ""
+	for page := 0; ; page++ {
+		if page >= maxToolsListPages {
+			return nil, fmt.Errorf("resources/list did not terminate after %d pages (server keeps returning a cursor)", maxToolsListPages)
+		}
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		var result resourcesListResult
+		if err := s.call(context.Background(), "resources/list", params, &result); err != nil {
+			return nil, err
+		}
+		resources = append(resources, result.Resources...)
+		if result.NextCursor == "" {
+			break
+		}
+		if result.NextCursor == cursor {
+			return nil, fmt.Errorf("resources/list returned the same cursor twice (%q) — server appears stuck", cursor)
+		}
+		cursor = result.NextCursor
+	}
+	return resources, nil
+}
+
+func (s *Server) listPrompts() ([]Prompt, error) {
+	var prompts []Prompt
+	cursor := ""
+	for page := 0; ; page++ {
+		if page >= maxToolsListPages {
+			return nil, fmt.Errorf("prompts/list did not terminate after %d pages (server keeps returning a cursor)", maxToolsListPages)
+		}
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		var result promptsListResult
+		if err := s.call(context.Background(), "prompts/list", params, &result); err != nil {
+			return nil, err
+		}
+		prompts = append(prompts, result.Prompts...)
+		if result.NextCursor == "" {
+			break
+		}
+		if result.NextCursor == cursor {
+			return nil, fmt.Errorf("prompts/list returned the same cursor twice (%q) — server appears stuck", cursor)
+		}
+		cursor = result.NextCursor
+	}
+	return prompts, nil
+}
+
+// ReadResource fetches uri's content from the server, concatenating
+// every returned content block's text (a resource can legally return
+// more than one, e.g. a directory listing plus a summary).
+func (s *Server) ReadResource(ctx context.Context, uri string) (string, error) {
+	if s.broken.Load() {
+		return "", fmt.Errorf("mcp server %s: connection is no longer usable — restart chisel to reconnect", s.name)
+	}
+	var result resourcesReadResult
+	if err := s.call(ctx, "resources/read", resourcesReadParams{URI: uri}, &result); err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for i, c := range result.Contents {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(c.Text)
+	}
+	return b.String(), nil
+}
+
+// GetPrompt fetches name's expanded template text from the server —
+// the MCP equivalent of chisel's own customcmd.Expand, except the
+// substitution happens server-side. Concatenates every returned
+// message's text content in order; role is deliberately ignored (a
+// multi-message prompt is rare, and chisel has no per-message-role
+// slot to route them into individually — the whole point is a single
+// block of text to submit as chisel's own user turn).
+func (s *Server) GetPrompt(ctx context.Context, name string, arguments map[string]string) (string, error) {
+	if s.broken.Load() {
+		return "", fmt.Errorf("mcp server %s: connection is no longer usable — restart chisel to reconnect", s.name)
+	}
+	var result promptsGetResult
+	if err := s.call(ctx, "prompts/get", promptsGetParams{Name: name, Arguments: arguments}, &result); err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for i, m := range result.Messages {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(m.Content.Text)
+	}
+	return b.String(), nil
 }
 
 // call sends a JSON-RPC request and waits for the response with a

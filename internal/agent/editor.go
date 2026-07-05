@@ -71,6 +71,10 @@ func viewPath(path string, viewRange []int) (string, error) {
 		return strings.Join(names, "\n"), nil
 	}
 
+	if isSensitiveFile(path) {
+		return "", fmt.Errorf("%s looks like it may hold secrets (matches a pattern like .env, *.pem, credentials.json) — view refuses to read it", filepath.Base(path))
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err

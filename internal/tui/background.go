@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
+	"strings"
 	"sync/atomic"
 	"syscall"
 
@@ -187,6 +189,76 @@ func (m Model) handleBackgroundTaskDone(msg backgroundTaskDoneMsg) (Model, tea.C
 
 	m.messages = append(m.messages, resultMsg)
 	return m, tea.Batch(saveSession(m.workDir, m.sessionID, m.messages), notifyIdle(summary), gitStatus)
+}
+
+// handleTasksCommand implements /tasks [cancel <id>] — the user-facing
+// surface Model.backgroundTasks never had before: it was tracked
+// internally (for the exit-time CancelBackgroundTasks sweep and for
+// handleBackgroundTaskDone to look up which command just finished) but
+// had no way to list what's running or stop one early short of quitting
+// chisel entirely.
+func (m Model) handleTasksCommand(args []string) Model {
+	if len(args) == 0 {
+		return m.listBackgroundTasks()
+	}
+	if args[0] != "cancel" {
+		m.appendLine(errorStyle.Render("usage: /tasks [cancel <id>] — bare /tasks lists what's running or recently finished"))
+		return m
+	}
+	if len(args) < 2 {
+		m.appendLine(errorStyle.Render("usage: /tasks cancel <id>"))
+		return m
+	}
+	return m.cancelBackgroundTask(args[1])
+}
+
+func (m Model) listBackgroundTasks() Model {
+	if len(m.backgroundTasks) == 0 {
+		m.appendLine(dimStyle.Render("no background tasks — bash_background starts one"))
+		return m
+	}
+
+	ids := make([]string, 0, len(m.backgroundTasks))
+	for id := range m.backgroundTasks {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	var b strings.Builder
+	b.WriteString("background tasks:\n")
+	for _, id := range ids {
+		task := m.backgroundTasks[id]
+		status := "running"
+		if !task.running {
+			status = "finished"
+		}
+		fmt.Fprintf(&b, "  %s (%s): %s\n", id, status, task.command)
+	}
+	b.WriteString("type /tasks cancel <id> to stop a running one")
+	m.appendLine(dimStyle.Render(b.String()))
+	return m
+}
+
+// cancelBackgroundTask fires the same CancelFunc CancelBackgroundTasks
+// uses at exit, just against one specific task instead of all of them.
+// Doesn't flip task.running itself — that only happens once
+// handleBackgroundTaskDone actually processes the resulting
+// backgroundTaskDoneMsg (the killed process still has to actually exit
+// and its output get collected), so the confirmation is deliberately
+// phrased as in-progress, not already done.
+func (m Model) cancelBackgroundTask(id string) Model {
+	task, ok := m.backgroundTasks[id]
+	if !ok {
+		m.appendLine(errorStyle.Render("no background task with id " + id + " — /tasks lists what's tracked"))
+		return m
+	}
+	if !task.running {
+		m.appendLine(dimStyle.Render(id + " has already finished"))
+		return m
+	}
+	task.cancel()
+	m.appendLine(dimStyle.Render("cancelling " + id + "…"))
+	return m
 }
 
 // CancelBackgroundTasks kills every still-running background task's

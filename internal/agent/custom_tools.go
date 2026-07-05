@@ -22,6 +22,7 @@ func buildTools() []Tool {
 		subagentDispatchTool(nil),
 		updateTodosTool(),
 		rememberTool(),
+		oracleTool(),
 	}
 }
 

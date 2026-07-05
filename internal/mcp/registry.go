@@ -133,6 +133,81 @@ func (r *Registry) Tools() []Tool {
 	return tools
 }
 
+// ResourceRef namespaces one server's resource with which server it
+// came from, for display and for RegistryReadResource's dispatch.
+type ResourceRef struct {
+	Server      string
+	URI         string
+	Name        string
+	Description string
+}
+
+// Resources returns every resource from every running server that
+// actually implements resources/list — most don't, and that's not an
+// error (see Server.listResources' own doc comment), it's just an
+// empty contribution to this list. Sorted by server then URI for the
+// same stable-ordering reason Tools() sorts.
+func (r *Registry) Resources() []ResourceRef {
+	var refs []ResourceRef
+	for name, s := range r.servers {
+		for _, res := range s.Resources() {
+			refs = append(refs, ResourceRef{Server: name, URI: res.URI, Name: res.Name, Description: res.Description})
+		}
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Server != refs[j].Server {
+			return refs[i].Server < refs[j].Server
+		}
+		return refs[i].URI < refs[j].URI
+	})
+	return refs
+}
+
+// ReadResource fetches uri from serverName.
+func (r *Registry) ReadResource(ctx context.Context, serverName, uri string) (string, error) {
+	s, ok := r.servers[serverName]
+	if !ok {
+		return "", fmt.Errorf("mcp server %q is not running", serverName)
+	}
+	return s.ReadResource(ctx, uri)
+}
+
+// PromptRef namespaces one server's prompt the same way ResourceRef does.
+type PromptRef struct {
+	Server      string
+	Name        string
+	Description string
+	Arguments   []PromptArgument
+}
+
+// Prompts returns every prompt from every running server that actually
+// implements prompts/list — same "most don't, that's fine" caveat as
+// Resources.
+func (r *Registry) Prompts() []PromptRef {
+	var refs []PromptRef
+	for name, s := range r.servers {
+		for _, p := range s.Prompts() {
+			refs = append(refs, PromptRef{Server: name, Name: p.Name, Description: p.Description, Arguments: p.Arguments})
+		}
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Server != refs[j].Server {
+			return refs[i].Server < refs[j].Server
+		}
+		return refs[i].Name < refs[j].Name
+	})
+	return refs
+}
+
+// GetPrompt fetches and expands name from serverName with arguments.
+func (r *Registry) GetPrompt(ctx context.Context, serverName, name string, arguments map[string]string) (string, error) {
+	s, ok := r.servers[serverName]
+	if !ok {
+		return "", fmt.Errorf("mcp server %q is not running", serverName)
+	}
+	return s.GetPrompt(ctx, name, arguments)
+}
+
 // ServerStatus is a snapshot of one configured server's health, for
 // display (see /status in the tui package).
 type ServerStatus struct {

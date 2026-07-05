@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -190,6 +191,19 @@ type Model struct {
 	// so an unbounded loop can't run away silently.
 	goal              string
 	goalContinuations int
+	// lastAssistantText/assistantTextRepeatCount track consecutive
+	// turns where the assistant's own final text response came back
+	// identical — opencode's 2026 extension of the same doom-loop idea
+	// lastToolCallKey/toolCallRepeatCount already apply to repeated tool
+	// calls (see permission.go's doomLoopThreshold), applied here to
+	// repeated *output* instead of repeated *actions*. Most valuable
+	// against /goal's auto-continuation specifically: without this, a
+	// model that's already stuck saying the same thing verbatim would
+	// keep getting re-prompted to "continue" until maxGoalContinuations
+	// ran out, for zero actual progress. Reset on a real user
+	// submission (see submit()) the same way goalContinuations is.
+	lastAssistantText        string
+	assistantTextRepeatCount int
 
 	// todos is the model's current task checklist, replaced wholesale
 	// on every successful update_todos call (see parseTodos in todo.go)
@@ -653,7 +667,7 @@ func (m *Model) endStreamLine() {
 // approved via the permission prompt, rather than pre-empting the prompt
 // entirely — accepted for the simplicity of not needing a second async
 // round-trip before every permission decision.
-func executeTool(ctx context.Context, workDir, model string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, skills map[string]skill.Skill, subagents map[string]subagentdef.Subagent, call agent.ToolCall) tea.Cmd {
+func executeTool(ctx context.Context, workDir, model string, bash *agent.BashSession, mcpRegistry *mcp.Registry, hooksCfg hooks.Config, skills map[string]skill.Skill, subagents map[string]subagentdef.Subagent, plannerModel string, call agent.ToolCall) tea.Cmd {
 	// bash_background needs to return a tea.Batch (the "started" result,
 	// a record for Update to track, and a watcher that fires much
 	// later, whenever the command actually finishes) rather than a
@@ -704,7 +718,7 @@ func executeTool(ctx context.Context, workDir, model string, bash *agent.BashSes
 				result = agent.ToolResult{ID: call.ID, Content: agent.TruncateOutput(content), IsError: isError}
 			}
 		} else {
-			result = agent.Execute(ctx, workDir, model, call, bash, skills, subagents)
+			result = agent.Execute(ctx, workDir, model, call, bash, skills, subagents, plannerModel)
 		}
 
 		if !result.IsError {
@@ -842,9 +856,22 @@ const compactPrompt = "Summarize this conversation so far in a concise form for 
 // otherwise return empty content that silently replaces the whole
 // conversation with nothing. The explicit check below is the backstop
 // for a model that ignores the empty tool set and calls one anyway.
-func compact(ctx context.Context, client *agent.Client, messages []agent.Message) tea.Cmd {
+// compact runs any configured PreCompact hooks first (best-effort — a
+// hook failing doesn't stop the compaction itself, the same
+// "notification, not a gate" reasoning RunPreCompact's own doc comment
+// explains) before sending messages plus the compaction instruction and
+// returning the model's summary. workDir/hooksCfg are only used for
+// that; a zero-value hooksCfg (no PreCompact hooks configured) skips
+// the whole thing with no extra file I/O.
+func compact(ctx context.Context, client *agent.Client, messages []agent.Message, focus, workDir string, hooksCfg hooks.Config) tea.Cmd {
 	return func() tea.Msg {
-		history := append(append([]agent.Message{}, messages...), agent.Message{Role: "user", Content: compactPrompt})
+		runPreCompactHooks(ctx, workDir, hooksCfg.Hooks.PreCompact, messages)
+
+		prompt := compactPrompt
+		if focus != "" {
+			prompt += "\n\nPay particular attention to: " + focus
+		}
+		history := append(append([]agent.Message{}, messages...), agent.Message{Role: "user", Content: prompt})
 
 		ch, err := client.WithoutTools().SendStreaming(ctx, history)
 		if err != nil {
@@ -863,6 +890,34 @@ func compact(ctx context.Context, client *agent.Client, messages []agent.Message
 		}
 		return compactResultMsg{summary: msg.Content, usage: usage}
 	}
+}
+
+// runPreCompactHooks writes messages to a temp file as markdown (reusing
+// /export's own renderer) and runs every configured PreCompact hook
+// against it, so a hook can back up the full conversation before it's
+// replaced with a summary — see CHISEL_HOOK_TRANSCRIPT_PATH in
+// hooks.RunPreCompact. Best-effort throughout: a temp-file write
+// failure or a hook error is reported quietly rather than blocking the
+// compaction itself, matching PreCompact's own notification-only
+// contract. A no-op (no temp file even created) when there's nothing
+// configured.
+func runPreCompactHooks(ctx context.Context, workDir string, list []hooks.Hook, messages []agent.Message) {
+	if len(list) == 0 {
+		return
+	}
+	f, err := os.CreateTemp("", "chisel-precompact-*.md")
+	if err != nil {
+		return
+	}
+	defer func() { _ = os.Remove(f.Name()) }()
+
+	if _, err := f.WriteString(renderTranscriptMarkdown(messages)); err != nil {
+		_ = f.Close()
+		return
+	}
+	_ = f.Close()
+
+	_ = hooks.RunPreCompact(ctx, workDir, list, f.Name())
 }
 
 // compactedHistory replaces the full conversation with a single message

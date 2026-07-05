@@ -89,3 +89,70 @@ type toolsCallResult struct {
 	} `json:"content"`
 	IsError bool `json:"isError"`
 }
+
+// Resource is one resource an MCP server exposes (a file, a URL, a
+// database record — anything the server wants to make @-mentionable
+// context), in the server's own naming. Unlike Tool, not every server
+// implements resources/list at all — listResources treats that as
+// "this server has none," not an error.
+type Resource struct {
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	MimeType    string `json:"mimeType"`
+}
+
+type resourcesListResult struct {
+	Resources  []Resource `json:"resources"`
+	NextCursor string     `json:"nextCursor,omitempty"`
+}
+
+type resourcesReadParams struct {
+	URI string `json:"uri"`
+}
+
+type resourcesReadResult struct {
+	Contents []struct {
+		URI      string `json:"uri"`
+		MimeType string `json:"mimeType"`
+		Text     string `json:"text"`
+	} `json:"contents"`
+}
+
+// Prompt is one prompt template an MCP server exposes — the MCP
+// equivalent of chisel's own custom slash commands, except the
+// expansion happens server-side (promptsGet) rather than local string
+// substitution. Same "not every server implements this" caveat as
+// Resource.
+type Prompt struct {
+	Name        string           `json:"name"`
+	Description string           `json:"description"`
+	Arguments   []PromptArgument `json:"arguments"`
+}
+
+type PromptArgument struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Required    bool   `json:"required"`
+}
+
+type promptsListResult struct {
+	Prompts    []Prompt `json:"prompts"`
+	NextCursor string   `json:"nextCursor,omitempty"`
+}
+
+type promptsGetParams struct {
+	Name      string            `json:"name"`
+	Arguments map[string]string `json:"arguments,omitempty"`
+}
+
+type promptsGetResult struct {
+	Description string `json:"description"`
+	Messages    []struct {
+		Role    string `json:"role"`
+		Content struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"messages"`
+}

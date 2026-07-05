@@ -42,7 +42,7 @@ func TestExecuteToolBlockedByPreHook(t *testing.T) {
 		Arguments: `{"command":"str_replace","path":"protected.go","old_str":"package main","new_str":"package other"}`,
 	}}
 
-	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, "", call)
 	msg := cmd()
 
 	result, ok := msg.(toolResultMsg)
@@ -82,7 +82,7 @@ func TestExecuteToolAllowedByPreHook(t *testing.T) {
 		Arguments: `{"command":"str_replace","path":"a.go","old_str":"package main","new_str":"package other"}`,
 	}}
 
-	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, "", call)
 	result := cmd().(toolResultMsg).result
 	if result.IsError {
 		t.Fatalf("call was blocked unexpectedly: %s", result.Content)
@@ -105,7 +105,7 @@ func TestExecuteToolPostHookOutputAppended(t *testing.T) {
 		Arguments: `{"command":"str_replace","path":"a.go","old_str":"package main","new_str":"package other"}`,
 	}}
 
-	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, "", call)
 	result := cmd().(toolResultMsg).result
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content)
@@ -129,7 +129,7 @@ func TestExecuteToolPostHookSkippedOnFailure(t *testing.T) {
 		Arguments: `{"command":"str_replace","path":"nonexistent.go","old_str":"x","new_str":"y"}`,
 	}}
 
-	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, "", call)
 	result := cmd().(toolResultMsg).result
 	if !result.IsError {
 		t.Fatal("expected the edit itself to fail (file doesn't exist)")
@@ -164,7 +164,7 @@ func TestExecuteToolCapsCombinedPostHookOutput(t *testing.T) {
 		Arguments: `{"command":"str_replace","path":"a.go","old_str":"package main","new_str":"package other"}`,
 	}}
 
-	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, "", call)
 	result := cmd().(toolResultMsg).result
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content)
@@ -188,7 +188,7 @@ func TestExecuteToolThreadsSkillsToLoadSkill(t *testing.T) {
 		Arguments: `{"name":"go-review"}`,
 	}}
 
-	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooks.Config{}, skills, nil, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooks.Config{}, skills, nil, "", call)
 	result := cmd().(toolResultMsg).result
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content)
@@ -211,7 +211,7 @@ func TestExecuteToolBashBackgroundBlockedByPreHook(t *testing.T) {
 		Arguments: `{"command":"sleep 10"}`,
 	}}
 
-	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, "", call)
 	msg := cmd()
 
 	result, ok := msg.(toolResultMsg)
@@ -236,7 +236,7 @@ func TestExecuteToolBashBackgroundAllowedByPreHookReturnsBatch(t *testing.T) {
 		Arguments: `{"command":"echo hi"}`,
 	}}
 
-	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, call)
+	cmd := executeTool(context.Background(), dir, "minimax-m3", nil, nil, hooksCfg, nil, nil, "", call)
 	msg := cmd()
 
 	batch, ok := msg.(tea.BatchMsg)

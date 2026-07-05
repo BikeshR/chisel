@@ -188,6 +188,9 @@ func runGrep(workDir string, rawInput json.RawMessage) (string, error) {
 		if err != nil {
 			return nil // escapes the working directory — skip silently, same as an unreadable file
 		}
+		if isSensitiveFile(resolved) {
+			return nil // matches a known-secret filename (see isSensitiveFile) — skip silently, same treatment as an unreadable file
+		}
 
 		f, err := os.Open(resolved)
 		if err != nil {

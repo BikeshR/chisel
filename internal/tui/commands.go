@@ -28,6 +28,7 @@ var builtinCommandNames = []string{
 	"/help", "/model", "/think", "/new", "/compact", "/retry",
 	"/git", "/plan", "/accept-edits", "/status", "/usage", "/rewind", "/queue",
 	"/sessions", "/resume", "/memory", "/branch", "/goal", "/context", "/diff", "/hooks",
+	"/mcp-prompts", "/mcp-prompt", "/mcp-resources", "/mcp-resource", "/tasks", "/export",
 }
 
 // commandNames returns every "/"-command name available for the
@@ -61,7 +62,7 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 	case "/git":
 		return m.handleGitCommand(fields[1:]), nil
 	case "/compact":
-		return m.handleCompactCommand()
+		return m.handleCompactCommand(strings.TrimSpace(strings.TrimPrefix(text, fields[0])))
 	case "/plan":
 		return m.handlePlanCommand(), nil
 	case "/accept-edits":
@@ -72,6 +73,14 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 		return m.handleStatusCommand(), nil
 	case "/hooks":
 		return m.handleHooksCommand(fields[1:]), nil
+	case "/mcp-prompts":
+		return m.handleMCPPromptsCommand(), nil
+	case "/mcp-prompt":
+		return m.handleMCPPromptCommand(fields[1:])
+	case "/mcp-resources":
+		return m.handleMCPResourcesCommand(), nil
+	case "/mcp-resource":
+		return m.handleMCPResourceCommand(fields[1:])
 	case "/usage":
 		return m.handleUsageCommand(), nil
 	case "/context":
@@ -86,6 +95,10 @@ func (m Model) handleCommand(text string) (Model, tea.Cmd) {
 		return m.handleResumeCommand(fields[1:])
 	case "/queue":
 		return m.handleQueueCommand(fields[1:]), nil
+	case "/tasks":
+		return m.handleTasksCommand(fields[1:]), nil
+	case "/export":
+		return m.handleExportCommand(fields[1:]), nil
 	case "/memory":
 		return m.handleMemoryCommand(fields[1:]), nil
 	case "/goal":
@@ -129,13 +142,17 @@ const helpText = `commands:
   /think                toggle showing <think> blocks in full
   /new                  start a fresh session (previous one stays saved — /sessions, /resume)
   /branch               fork this conversation into a new session, keeping the current one too
-  /compact              summarize the conversation to save context
+  /compact [focus]       summarize the conversation to save context, optionally steered toward focus
   /retry                re-send the last request after a failure
   /git auto [on|off]    toggle auto-commit after each turn
   /plan                 toggle plan mode (read-only exploration only)
   /accept-edits         toggle accept-edits mode (file edits run without asking; bash/MCP still ask)
   /status               show workdir, session, hooks, MCP, and memory info
   /hooks init            scaffold .chisel/hooks.json with a working lint-after-edit example
+  /mcp-prompts           list MCP prompt templates available across running servers
+  /mcp-prompt <server> <name> [k=v ...]   fetch and submit an MCP prompt template
+  /mcp-resources         list MCP resources available across running servers
+  /mcp-resource <server> <uri>            load an MCP resource into the conversation
   /usage                show token/request counts since launch
   /context              rough estimated breakdown of what's using context, by category
   /rewind [n]           list checkpoints, or restore code+conversation to checkpoint n
@@ -143,6 +160,8 @@ const helpText = `commands:
   /sessions             list every saved session for this directory
   /resume [n]           list sessions, or switch this conversation to session n
   /queue [clear]        list messages queued while busy, or drop them all
+  /tasks [cancel <id>]   list background tasks (bash_background), or cancel one
+  /export [path]         write the conversation to a markdown file (default: ./chisel-export-<timestamp>.md)
   /memory [clear]       show what the model has remembered about this project, or clear it
   /goal [text|clear]    set a standing goal to auto-continue toward after each turn, show it, or clear it
 
@@ -463,9 +482,9 @@ func (m Model) handleMemoryCommand(args []string) Model {
 const maxGoalContinuations = 25
 
 // handleGoalCommand implements /goal [text|clear]. Setting or clearing
-// a goal always resets goalContinuations — a fresh goal (or none at
-// all) starts its own budget rather than inheriting whatever was left
-// from a previous one.
+// a goal always resets goalContinuations and assistantTextRepeatCount —
+// a fresh goal (or none at all) starts its own budget rather than
+// inheriting whatever was left from a previous one.
 func (m Model) handleGoalCommand(arg string) Model {
 	if arg == "" {
 		if m.goal == "" {
@@ -478,25 +497,47 @@ func (m Model) handleGoalCommand(arg string) Model {
 	if arg == "clear" {
 		m.goal = ""
 		m.goalContinuations = 0
+		m.assistantTextRepeatCount = 0
 		m.appendLine(dimStyle.Render("goal cleared"))
 		return m
 	}
 	m.goal = arg
 	m.goalContinuations = 0
+	m.assistantTextRepeatCount = 0
 	m.appendLine(dimStyle.Render("goal set: " + m.goal + " — chisel will keep going toward it after each turn instead of stopping; /goal clear to stop"))
 	return m
 }
+
+// assistantTextRepeatThreshold reuses doomLoopThreshold's own number —
+// opencode's 2026 extension of the identical-tool-call guard to also
+// catch repeated reasoning/output applies here: a model whose final
+// text response comes back verbatim identical this many turns in a row
+// is stuck, not making progress, the same failure mode doomLoopThreshold
+// already catches for repeated tool calls. Checked only by
+// continueTowardGoal today — a normal (non-goal) turn ending in
+// repeated text just returns control to the user anyway, so there's
+// nothing automatic to guard against there.
+const assistantTextRepeatThreshold = doomLoopThreshold
 
 // continueTowardGoal auto-submits a "keep going" follow-up toward the
 // standing /goal, the same path a real typed message takes
 // (submitText) — every tool call it leads to still goes through the
 // normal permission gate exactly like any other turn; this only
 // automates the re-prompting between turns. Returns a nil Cmd once
-// maxGoalContinuations is hit, so the caller falls back to its normal
-// idle handling instead of continuing indefinitely.
+// maxGoalContinuations is hit, or once the model's own responses start
+// repeating verbatim (assistantTextRepeatThreshold) — continuing
+// against a model that's already stuck saying the same thing would
+// just burn through the continuation budget for no new progress — so
+// the caller falls back to its normal idle handling instead of
+// continuing indefinitely either way.
 func (m Model) continueTowardGoal() (Model, tea.Cmd) {
 	if m.goalContinuations >= maxGoalContinuations {
 		m.appendLine(dimStyle.Render(fmt.Sprintf("goal continuation limit reached (%d) — /goal to check it, /goal clear to stop, or just tell me to keep going", maxGoalContinuations)))
+		m.goal = ""
+		return m, nil
+	}
+	if m.assistantTextRepeatCount >= assistantTextRepeatThreshold {
+		m.appendLine(dimStyle.Render(fmt.Sprintf("stopped auto-continuing — the last %d responses were identical, which usually means the goal is stuck rather than still being worked on. /goal to check it, /goal clear to stop, or tell me what to do differently.", m.assistantTextRepeatCount)))
 		m.goal = ""
 		return m, nil
 	}
@@ -737,15 +778,22 @@ func (m Model) handleModelCheckResult(msg modelCheckResultMsg) (tea.Model, tea.C
 // handleCompactCommand asks the model to summarize the conversation so
 // far and replaces the history with that summary — chisel's answer to
 // "manual context management" since there's no server-side compaction to
-// lean on.
-func (m Model) handleCompactCommand() (Model, tea.Cmd) {
+// lean on. focus is an optional instruction (Cursor's /summarize and
+// Claude Code's /compact <instructions> both take one) folded into the
+// compaction prompt so the summary can be steered toward what actually
+// matters for what comes next, rather than always the same generic shape.
+func (m Model) handleCompactCommand(focus string) (Model, tea.Cmd) {
 	if len(m.messages) == 0 {
 		m.appendLine(dimStyle.Render("nothing to compact yet"))
 		return m, nil
 	}
-	m.appendLine(dimStyle.Render("compacting…"))
+	notice := "compacting…"
+	if focus != "" {
+		notice = fmt.Sprintf("compacting (focus: %s)…", focus)
+	}
+	m.appendLine(dimStyle.Render(notice))
 	m.startBusy(stateWaitingModel)
-	return m, compact(m.newTurnContext(), m.client, m.messages)
+	return m, compact(m.newTurnContext(), m.client, m.messages, focus, m.workDir, m.hooks)
 }
 
 func (m Model) handleCompactResult(msg compactResultMsg) (tea.Model, tea.Cmd) {

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -177,9 +178,13 @@ func TestPersistableRuleForBash(t *testing.T) {
 	}
 }
 
-func TestPersistableRuleForExcludesEditsAndMCP(t *testing.T) {
+// TestPersistableRuleForExcludesMCPAndReadOnlyTools confirms only
+// bash/bash_background/str_replace_based_edit_tool support a
+// persistent rule — an MCP tool's own arguments (arbitrary per-server
+// shape) and a read-only tool that already needs no permission at all
+// have no natural single string to write a glob against.
+func TestPersistableRuleForExcludesMCPAndReadOnlyTools(t *testing.T) {
 	cases := []agent.ToolCall{
-		{Function: agent.ToolCallFunction{Name: "str_replace_based_edit_tool", Arguments: `{"command":"str_replace","path":"a.go","old_str":"x","new_str":"y"}`}},
 		{Function: agent.ToolCallFunction{Name: "mcp__github__create_issue", Arguments: `{}`}},
 		{Function: agent.ToolCallFunction{Name: "glob", Arguments: `{"pattern":"**/*.go"}`}},
 	}
@@ -187,6 +192,26 @@ func TestPersistableRuleForExcludesEditsAndMCP(t *testing.T) {
 		if _, _, ok := persistableRuleFor(call); ok {
 			t.Errorf("expected %s to not support a persistent rule", call.Function.Name)
 		}
+	}
+}
+
+// TestPersistableRuleForIncludesEditPath is the direct regression test
+// for the feature: a file edit's path is just as natural a single
+// string to glob-match as a bash command's own text, so
+// str_replace_based_edit_tool must support a persistent rule keyed by
+// path — unlike allowlistKey's session-only "always allow," which
+// deliberately still excludes edits (each one has a materially
+// different diff, so an exact-match allowlist entry doesn't carry the
+// same meaning there); a path glob is a different mechanism entirely
+// and doesn't share that problem.
+func TestPersistableRuleForIncludesEditPath(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{Name: "str_replace_based_edit_tool", Arguments: `{"command":"str_replace","path":"src/main.go","old_str":"x","new_str":"y"}`}}
+	toolName, pattern, ok := persistableRuleFor(call)
+	if !ok {
+		t.Fatal("expected str_replace_based_edit_tool to support a persistent rule")
+	}
+	if toolName != "str_replace_based_edit_tool" || pattern != "src/main.go" {
+		t.Errorf("toolName=%q pattern=%q, want str_replace_based_edit_tool / src/main.go", toolName, pattern)
 	}
 }
 
@@ -236,6 +261,55 @@ func TestPressingPWritesPermanentRuleAndRuns(t *testing.T) {
 	}
 	if !trusted {
 		t.Error("expected the newly written permissions.json to be auto-trusted")
+	}
+}
+
+// TestPressingPWritesPermanentEditRuleAndRuns is
+// TestPressingPWritesPermanentRuleAndRuns's counterpart for a file
+// edit — confirms the "p" prompt option actually persists a path-glob
+// rule end-to-end (in-memory, on disk, and re-loadable) rather than
+// just decidePermission accepting one in isolation.
+func TestPressingPWritesPermanentEditRuleAndRuns(t *testing.T) {
+	workDir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	if err := os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := Model{
+		client:  agent.New("minimax-m3"),
+		workDir: workDir,
+		state:   stateAwaitingPermission,
+		pendingUses: []agent.ToolCall{
+			{ID: "call_1", Function: agent.ToolCallFunction{
+				Name:      "str_replace_based_edit_tool",
+				Arguments: `{"command":"str_replace","path":"main.go","old_str":"package main","new_str":"package other"}`,
+			}},
+		},
+	}
+
+	got, cmd := m.handleKey(tea.KeyMsg{Runes: []rune("p"), Type: tea.KeyRunes})
+	if cmd == nil {
+		t.Fatal("expected a non-nil Cmd — 'p' should run the call like 'y' does")
+	}
+	gotModel := got.(Model)
+	if gotModel.state != stateExecutingTool {
+		t.Errorf("state = %v, want stateExecutingTool", gotModel.state)
+	}
+
+	if decision, matched := permrules.Match(gotModel.permRules, "str_replace_based_edit_tool", "main.go"); !matched || decision != permrules.Allow {
+		t.Errorf("in-memory permRules Match = (%v, %v), want (Allow, true)", decision, matched)
+	}
+
+	loaded, found, err := permrules.Load(workDir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !found {
+		t.Fatal("expected permissions.json to have been written")
+	}
+	if decision, matched := permrules.Match(loaded, "str_replace_based_edit_tool", "main.go"); !matched || decision != permrules.Allow {
+		t.Errorf("Match after reload = (%v, %v), want (Allow, true)", decision, matched)
 	}
 }
 
@@ -291,12 +365,19 @@ func TestPressingPDoesNotClobberExistingRulesWhenInMemoryStateIsStale(t *testing
 	}
 }
 
+// TestPressingPOnIneligibleCallStillApproves used to use a file-edit
+// call as its "ineligible" fixture — str_replace_based_edit_tool is no
+// longer ineligible now that persistableRuleFor supports a path-scoped
+// rule for it (see TestPersistableRuleForIncludesEditPath), so this now
+// uses an MCP call, which genuinely has no natural single string to
+// write a persistent glob rule against.
 func TestPressingPOnIneligibleCallStillApproves(t *testing.T) {
 	m := Model{
-		client: agent.New("minimax-m3"),
-		state:  stateAwaitingPermission,
+		client:  agent.New("minimax-m3"),
+		workDir: t.TempDir(),
+		state:   stateAwaitingPermission,
 		pendingUses: []agent.ToolCall{
-			{ID: "call_1", Function: agent.ToolCallFunction{Name: "str_replace_based_edit_tool", Arguments: `{"command":"create","path":"a.go","file_text":"x"}`}},
+			{ID: "call_1", Function: agent.ToolCallFunction{Name: "mcp__github__create_issue", Arguments: `{"title":"x"}`}},
 		},
 	}
 
@@ -307,6 +388,9 @@ func TestPressingPOnIneligibleCallStillApproves(t *testing.T) {
 	gotModel := got.(Model)
 	if gotModel.state != stateExecutingTool {
 		t.Errorf("state = %v, want stateExecutingTool", gotModel.state)
+	}
+	if _, found, _ := permrules.Load(m.workDir); found {
+		t.Error("expected no permissions.json written for an ineligible call")
 	}
 }
 
@@ -542,6 +626,76 @@ func TestDecidePermissionDenyRuleOverridesNormalAutoAllow(t *testing.T) {
 	decision, _ := decidePermission(call, agent.ModeNormal, nil, rules)
 	if decision != permissionDeny {
 		t.Errorf("decision = %v, want permissionDeny", decision)
+	}
+}
+
+// TestDecidePermissionRuleAllowsEditPath is the direct regression test
+// for path-scoped edit rules: a persistent rule like "allow edits under
+// src/**" should auto-approve a matching file edit exactly the way a
+// bash command rule already does.
+func TestDecidePermissionRuleAllowsEditPath(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{
+		Name:      "str_replace_based_edit_tool",
+		Arguments: `{"command":"str_replace","path":"src/main.go","old_str":"x","new_str":"y"}`,
+	}}
+	rules := permrules.Config{"str_replace_based_edit_tool": permrules.RuleList{{Pattern: "src/*", Decision: permrules.Allow}}}
+
+	decision, _ := decidePermission(call, agent.ModeNormal, nil, rules)
+	if decision != permissionAllow {
+		t.Errorf("decision = %v, want permissionAllow — a matching allow rule for the edit's path", decision)
+	}
+}
+
+// TestDecidePermissionRuleDeniesEditPath confirms the same for a deny
+// rule — "never touch vendor/" should refuse the edit outright, the
+// same way a denied bash command does.
+func TestDecidePermissionRuleDeniesEditPath(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{
+		Name:      "str_replace_based_edit_tool",
+		Arguments: `{"command":"str_replace","path":"vendor/lib.go","old_str":"x","new_str":"y"}`,
+	}}
+	rules := permrules.Config{"str_replace_based_edit_tool": permrules.RuleList{{Pattern: "vendor/*", Decision: permrules.Deny}}}
+
+	decision, reason := decidePermission(call, agent.ModeNormal, nil, rules)
+	if decision != permissionDeny {
+		t.Errorf("decision = %v, want permissionDeny — a matching deny rule for the edit's path", decision)
+	}
+	if !strings.Contains(reason, "permissions.json") {
+		t.Errorf("reason = %q, want it to mention permissions.json", reason)
+	}
+}
+
+// TestDecidePermissionEditRuleDoesNotMatchUnrelatedPath confirms a rule
+// scoped to one path glob doesn't accidentally allow an edit elsewhere
+// — the normal ask path still applies for anything the rule doesn't
+// actually match.
+func TestDecidePermissionEditRuleDoesNotMatchUnrelatedPath(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{
+		Name:      "str_replace_based_edit_tool",
+		Arguments: `{"command":"str_replace","path":"internal/secrets.go","old_str":"x","new_str":"y"}`,
+	}}
+	rules := permrules.Config{"str_replace_based_edit_tool": permrules.RuleList{{Pattern: "src/*", Decision: permrules.Allow}}}
+
+	decision, _ := decidePermission(call, agent.ModeNormal, nil, rules)
+	if decision != permissionAsk {
+		t.Errorf("decision = %v, want permissionAsk — the rule's pattern doesn't match this path", decision)
+	}
+}
+
+// TestDecidePermissionPlanModeOverridesEditAllowRule mirrors
+// TestDecidePermissionPlanModeOverridesAllowRule for the new edit-path
+// rule type — plan mode's absolute guarantee must hold regardless of
+// which tool a rule was written for.
+func TestDecidePermissionPlanModeOverridesEditAllowRule(t *testing.T) {
+	call := agent.ToolCall{Function: agent.ToolCallFunction{
+		Name:      "str_replace_based_edit_tool",
+		Arguments: `{"command":"str_replace","path":"src/main.go","old_str":"x","new_str":"y"}`,
+	}}
+	rules := permrules.Config{"str_replace_based_edit_tool": permrules.RuleList{{Pattern: "src/*", Decision: permrules.Allow}}}
+
+	decision, _ := decidePermission(call, agent.ModePlan, nil, rules)
+	if decision != permissionDeny {
+		t.Errorf("decision = %v, want permissionDeny — plan mode must override even an allowlisted edit path", decision)
 	}
 }
 

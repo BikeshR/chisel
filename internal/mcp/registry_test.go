@@ -28,6 +28,82 @@ func TestRegistryToolsAreNamespaced(t *testing.T) {
 	}
 }
 
+func TestRegistryResourcesAreNamespaced(t *testing.T) {
+	s, err := Start("fake", fakeServerConfigWithResourcesAndPrompts())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	r := &Registry{servers: map[string]*Server{"fake": s}}
+	resources := r.Resources()
+	if len(resources) != 1 || resources[0].Server != "fake" || resources[0].URI != "file:///notes.txt" {
+		t.Fatalf("Resources() = %+v", resources)
+	}
+}
+
+func TestRegistryReadResourceDispatchesToCorrectServer(t *testing.T) {
+	s, err := Start("fake", fakeServerConfigWithResourcesAndPrompts())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	r := &Registry{servers: map[string]*Server{"fake": s}}
+	content, err := r.ReadResource(context.Background(), "fake", "file:///notes.txt")
+	if err != nil {
+		t.Fatalf("ReadResource: %v", err)
+	}
+	if !strings.Contains(content, "file:///notes.txt") {
+		t.Errorf("content = %q", content)
+	}
+}
+
+func TestRegistryReadResourceUnknownServer(t *testing.T) {
+	r := &Registry{servers: map[string]*Server{}}
+	if _, err := r.ReadResource(context.Background(), "nope", "file:///x"); err == nil {
+		t.Error("expected an error for an unknown server")
+	}
+}
+
+func TestRegistryPromptsAreNamespaced(t *testing.T) {
+	s, err := Start("fake", fakeServerConfigWithResourcesAndPrompts())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	r := &Registry{servers: map[string]*Server{"fake": s}}
+	prompts := r.Prompts()
+	if len(prompts) != 1 || prompts[0].Server != "fake" || prompts[0].Name != "review" {
+		t.Fatalf("Prompts() = %+v", prompts)
+	}
+}
+
+func TestRegistryGetPromptDispatchesToCorrectServer(t *testing.T) {
+	s, err := Start("fake", fakeServerConfigWithResourcesAndPrompts())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	r := &Registry{servers: map[string]*Server{"fake": s}}
+	text, err := r.GetPrompt(context.Background(), "fake", "review", nil)
+	if err != nil {
+		t.Fatalf("GetPrompt: %v", err)
+	}
+	if !strings.Contains(text, "review") {
+		t.Errorf("text = %q", text)
+	}
+}
+
+func TestRegistryGetPromptUnknownServer(t *testing.T) {
+	r := &Registry{servers: map[string]*Server{}}
+	if _, err := r.GetPrompt(context.Background(), "nope", "review", nil); err == nil {
+		t.Error("expected an error for an unknown server")
+	}
+}
+
 func TestRegistryToolsAreSortedDeterministically(t *testing.T) {
 	sA, err := Start("zzz-server", fakeServerConfig())
 	if err != nil {

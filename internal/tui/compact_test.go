@@ -2,13 +2,16 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/BikeshR/chisel/internal/agent"
+	"github.com/BikeshR/chisel/internal/hooks"
 )
 
 func TestFormatTokenCount(t *testing.T) {
@@ -43,7 +46,7 @@ func TestCompactedHistory(t *testing.T) {
 
 func TestHandleCompactCommandEmptyHistory(t *testing.T) {
 	m := Model{}
-	got, cmd := m.handleCompactCommand()
+	got, cmd := m.handleCompactCommand("")
 	if cmd != nil {
 		t.Error("expected a nil Cmd when there's nothing to compact")
 	}
@@ -55,12 +58,143 @@ func TestHandleCompactCommandEmptyHistory(t *testing.T) {
 
 func TestHandleCompactCommandStartsAsync(t *testing.T) {
 	m := Model{messages: []agent.Message{{Role: "user", Content: "hi"}}}
-	got, cmd := m.handleCompactCommand()
+	got, cmd := m.handleCompactCommand("")
 	if cmd == nil {
 		t.Fatal("expected a non-nil Cmd to start the compaction request")
 	}
 	if got.state != stateWaitingModel {
 		t.Errorf("state = %v, want stateWaitingModel", got.state)
+	}
+}
+
+func TestHandleCompactCommandShowsFocusInNotice(t *testing.T) {
+	m := Model{messages: []agent.Message{{Role: "user", Content: "hi"}}}
+	got, _ := m.handleCompactCommand("the auth refactor")
+	lines := got.renderedLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "the auth refactor") {
+		t.Errorf("lines = %+v, want the focus text shown in the compacting notice", lines)
+	}
+}
+
+// compactRequestBody decodes just the fields these tests need out of a
+// real request body — internal/agent's own chatRequest is unexported,
+// so a test outside that package can't reference it directly.
+type compactRequestBody struct {
+	Messages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"messages"`
+}
+
+// TestCompactFoldsFocusIntoPrompt verifies the actual request body sent
+// on the wire includes the focus instruction, not just that
+// handleCompactCommand accepted the argument.
+func TestCompactFoldsFocusIntoPrompt(t *testing.T) {
+	var gotBody compactRequestBody
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"summary\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	client := agent.New("minimax-m3")
+	cmd := compact(context.Background(), client, []agent.Message{{Role: "user", Content: "hi"}}, "the auth refactor", "", hooks.Config{})
+	msg := cmd().(compactResultMsg)
+	if msg.err != nil {
+		t.Fatalf("compact: %v", msg.err)
+	}
+
+	last := gotBody.Messages[len(gotBody.Messages)-1]
+	if !strings.Contains(last.Content, "the auth refactor") {
+		t.Errorf("last message = %q, want the focus instruction included", last.Content)
+	}
+}
+
+// TestCompactWithoutFocusDoesNotMentionIt confirms the empty-focus path
+// (auto-compact, or a bare /compact) doesn't add an empty or malformed
+// "Pay particular attention to:" fragment.
+func TestCompactWithoutFocusDoesNotMentionIt(t *testing.T) {
+	var gotBody compactRequestBody
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"summary\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	client := agent.New("minimax-m3")
+	cmd := compact(context.Background(), client, []agent.Message{{Role: "user", Content: "hi"}}, "", "", hooks.Config{})
+	msg := cmd().(compactResultMsg)
+	if msg.err != nil {
+		t.Fatalf("compact: %v", msg.err)
+	}
+
+	last := gotBody.Messages[len(gotBody.Messages)-1]
+	if strings.Contains(last.Content, "Pay particular attention to") {
+		t.Errorf("last message = %q, want no focus fragment with an empty focus", last.Content)
+	}
+}
+
+// TestCompactRunsPreCompactHookWithTranscript is the direct regression
+// test for the feature: compact must run any configured PreCompact
+// hooks before the actual compaction request, with the full
+// conversation available to the hook via CHISEL_HOOK_TRANSCRIPT_PATH.
+func TestCompactRunsPreCompactHookWithTranscript(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"summary\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	dir := t.TempDir()
+	backupPath := dir + "/backup.md"
+	hooksCfg := hooks.Config{}
+	hooksCfg.Hooks.PreCompact = []hooks.Hook{{Command: `cp "$CHISEL_HOOK_TRANSCRIPT_PATH" "` + backupPath + `"`}}
+
+	client := agent.New("minimax-m3")
+	cmd := compact(context.Background(), client, []agent.Message{{Role: "user", Content: "the actual conversation content"}}, "", dir, hooksCfg)
+	msg := cmd().(compactResultMsg)
+	if msg.err != nil {
+		t.Fatalf("compact: %v", msg.err)
+	}
+
+	data, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("expected the PreCompact hook to have run and backed up the transcript: %v", err)
+	}
+	if !strings.Contains(string(data), "the actual conversation content") {
+		t.Errorf("backup content = %q, want the real conversation content present", data)
+	}
+}
+
+// TestCompactWithoutPreCompactHooksSkipsTempFile confirms the no-hooks
+// path doesn't even create a temp file — nothing to observe directly,
+// but this at least exercises it alongside the real compaction request
+// completing normally.
+func TestCompactWithoutPreCompactHooksSkipsTempFile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"summary\"}}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+	t.Setenv("CHISEL_BASE_URL", server.URL)
+	t.Setenv("CHISEL_API_KEY", "test-key")
+
+	client := agent.New("minimax-m3")
+	cmd := compact(context.Background(), client, []agent.Message{{Role: "user", Content: "hi"}}, "", t.TempDir(), hooks.Config{})
+	msg := cmd().(compactResultMsg)
+	if msg.err != nil {
+		t.Fatalf("compact: %v", msg.err)
+	}
+	if msg.summary != "summary" {
+		t.Errorf("summary = %q", msg.summary)
 	}
 }
 
@@ -177,7 +311,7 @@ func TestCompactRefusesAToolCallResponse(t *testing.T) {
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
 	client := agent.New("minimax-m3")
-	cmd := compact(context.Background(), client, []agent.Message{{Role: "user", Content: "hi"}})
+	cmd := compact(context.Background(), client, []agent.Message{{Role: "user", Content: "hi"}}, "", "", hooks.Config{})
 	msg := cmd().(compactResultMsg)
 
 	if msg.err == nil {
@@ -201,7 +335,7 @@ func TestCompactRefusesEmptyContentResponse(t *testing.T) {
 	t.Setenv("CHISEL_API_KEY", "test-key")
 
 	client := agent.New("minimax-m3")
-	cmd := compact(context.Background(), client, []agent.Message{{Role: "user", Content: "hi"}})
+	cmd := compact(context.Background(), client, []agent.Message{{Role: "user", Content: "hi"}}, "", "", hooks.Config{})
 	msg := cmd().(compactResultMsg)
 
 	if msg.err == nil {

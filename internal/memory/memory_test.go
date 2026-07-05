@@ -118,6 +118,134 @@ func TestLoadCombinesAgentsMdAndChiselMd(t *testing.T) {
 	}
 }
 
+// TestLoadExpandsIncludeInProjectFile is the direct regression test for
+// the feature: a bare "@shared.md" line in CHISEL.md should be replaced
+// with shared.md's own content, resolved relative to the project directory.
+func TestLoadExpandsIncludeInProjectFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "shared.md"), []byte("shared conventions here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ProjectPath(workDir), []byte("project notes\n@shared.md\nmore notes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	content, _, foundProject := Load(workDir)
+	if !foundProject {
+		t.Fatal("foundProject = false, want true")
+	}
+	if !strings.Contains(content, "shared conventions here") {
+		t.Errorf("content = %q, want the included file's content present", content)
+	}
+	if strings.Contains(content, "@shared.md") {
+		t.Errorf("content = %q, want the literal @shared.md line replaced, not left as-is", content)
+	}
+}
+
+// TestLoadDoesNotTreatInlineAtMentionAsInclude confirms only a line
+// that's *entirely* "@path" is treated as an include — prose that
+// merely mentions something starting with "@" must survive unchanged.
+func TestLoadDoesNotTreatInlineAtMentionAsInclude(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	if err := os.WriteFile(ProjectPath(workDir), []byte("ask @someone about the deploy process"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	content, _, _ := Load(workDir)
+	if !strings.Contains(content, "ask @someone about the deploy process") {
+		t.Errorf("content = %q, want the prose left untouched", content)
+	}
+}
+
+// TestLoadIncludeMissingFileLeftAsLiteralLine confirms a reference to a
+// file that doesn't exist doesn't error the whole load — it's optional
+// convenience, same as a missing CHISEL.md itself.
+func TestLoadIncludeMissingFileLeftAsLiteralLine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	if err := os.WriteFile(ProjectPath(workDir), []byte("@does-not-exist.md"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	content, _, foundProject := Load(workDir)
+	if !foundProject {
+		t.Fatal("foundProject = false, want true — the file itself exists even if its include target doesn't")
+	}
+	if !strings.Contains(content, "@does-not-exist.md") {
+		t.Errorf("content = %q, want the unresolvable include left as a literal line", content)
+	}
+}
+
+// TestLoadIncludeRejectsPathEscapingItsOwnDirectory confirms an
+// @include can't traverse outside the including file's own directory —
+// the same escape-prevention every filesystem-touching path in chisel
+// applies.
+func TestLoadIncludeRejectsPathEscapingItsOwnDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workDir := t.TempDir()
+
+	outsideDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret.md"), []byte("top secret content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rel, err := filepath.Rel(workDir, filepath.Join(outsideDir, "secret.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ProjectPath(workDir), []byte("@"+rel), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	content, _, _ := Load(workDir)
+	if strings.Contains(content, "top secret content") {
+		t.Errorf("content = %q, want the escaping include rejected, not followed", content)
+	}
+}
+
+// TestLoadIncludeExpandsRecursively confirms a chain of includes (A
+// includes B, B includes C) all resolve, each relative to its own file's
+// directory.
+func TestLoadIncludeExpandsRecursively(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "b.md"), []byte("content of b\n@c.md"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "c.md"), []byte("content of c"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ProjectPath(workDir), []byte("@b.md"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	content, _, _ := Load(workDir)
+	if !strings.Contains(content, "content of b") || !strings.Contains(content, "content of c") {
+		t.Errorf("content = %q, want both levels of the include chain expanded", content)
+	}
+}
+
+// TestExpandIncludesStopsAtMaxDepth is the safety-critical test for a
+// self-referencing cycle — without a depth bound, "a.md" including
+// itself would recurse forever. Calling this directly (not through
+// Load, which would itself never return on a real cycle) is itself
+// proof it terminates — a hung test process is exactly what "no depth
+// bound" would look like here.
+func TestExpandIncludesStopsAtMaxDepth(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.md"), []byte("@a.md"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := expandIncludes(dir, "@a.md", 0)
+	if got == "" {
+		t.Error("expandIncludes returned empty, want the unexpanded line left in place once the depth bound is hit")
+	}
+}
+
 func TestLoadIgnoresEmptyFiles(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	workDir := t.TempDir()

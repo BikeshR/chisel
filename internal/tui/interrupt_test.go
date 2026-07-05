@@ -210,7 +210,7 @@ func TestExecuteToolMarksInterruptedOnCancelledContext(t *testing.T) {
 	bash := agent.NewBashSession(t.TempDir())
 	defer bash.Close()
 
-	cmd := executeTool(ctx, t.TempDir(), "minimax-m3", bash, nil, hooks.Config{}, nil, nil, call)
+	cmd := executeTool(ctx, t.TempDir(), "minimax-m3", bash, nil, hooks.Config{}, nil, nil, "", call)
 	msg := cmd()
 
 	result, ok := msg.(toolResultMsg)
